@@ -8,6 +8,19 @@ pub struct Point {
     y: f64,
 }
 
+pub struct SplineSegment {
+    pub ax: f64,
+    pub bx: f64,
+    pub cx: f64,
+    pub dx: f64,               // cubic coefficients for x
+    pub ay: f64,
+    pub by: f64,
+    pub cy: f64,
+    pub dy: f64,               // cubic coefficients for y
+    pub t0: f64,               // parameter value at segment start
+    pub h: f64,                // segment length in parameter space
+}
+
 
 pub fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
@@ -88,6 +101,68 @@ pub fn cyclic_thomas(a: &[f64], b: &[f64], c: &[f64], r: &[f64], alpha: f64, bet
     }
 
     x
+}
+
+
+pub fn build_spline(points: &[Point], t: &[f64]) -> Vec<SplineSegment> {
+    let n = points.len();
+    let mut b = vec![0.0; n];
+    let mut h = vec![0.0; n];
+    let total_chord_length = t[n-1] + f64::hypot(points[0].x - points[n-1].x, points[0].y - points[n-1].y);
+
+    for i in 0..n-1 {
+        h[i] = t[i+1] - t[i];
+    }
+    h[n-1] = total_chord_length - t[n-1];
+
+    b[0] = 2.0 * (h[n-1] + h[0]);
+
+    for i in 1..n {
+        b[i] = 2.0 * (h[i-1] + h[i]);
+    }
+
+    let mut a = vec![0.0; n-1];
+    let mut c = vec![0.0; n-1];
+
+    for i in 0..n-1 {
+        a[i] = h[i];
+        c[i] = h[i];
+    }
+
+    let alpha = h[n-1];
+    let beta = h[n-1];
+
+    let mut r_x = vec![0.0; n];
+    let mut r_y = vec![0.0; n];
+
+    for i in 0..n {
+        let prev = if i == 0 { n - 1 } else { i - 1 };
+        let next = (i+1) % n;
+        r_x[i] = 6.0 *  ((points[next].x - points[i].x) / h[i] - (points[i].x - points[prev].x) / h[prev]);
+        r_y[i] = 6.0 *  ((points[next].y - points[i].y) / h[i] - (points[i].y - points[prev].y) / h[prev]);
+    }
+
+    let m_x = cyclic_thomas(&a, &b, &c, &r_x, alpha, beta);
+    let m_y = cyclic_thomas(&a, &b, &c, &r_y, alpha, beta);
+
+    let mut segments: Vec<SplineSegment> = Vec::new();
+    for i in 0..n {
+        let next = (i+1) % n;
+        segments.push(SplineSegment {
+            ax: points[i].x,
+            bx: (points[next].x - points[i].x) / h[i] - h[i] * (2.0 * m_x[i] + m_x[next]) / 6.0,
+            cx: m_x[i] / 2.0,
+            dx: (m_x[next] - m_x[i]) / (6.0 * h[i]),
+            ay: points[i].y,
+            by: (points[next].y - points[i].y) / h[i] - h[i] * (2.0 * m_y[i] + m_y[next]) / 6.0,
+            cy: m_y[i] / 2.0,
+            dy: (m_y[next] - m_y[i]) / (6.0 * h[i]),
+            t0: t[i],
+            h: h[i],
+        });
+    }
+
+    segments
 }
 
 
