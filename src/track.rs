@@ -35,10 +35,59 @@ pub fn chord_length_params(points: &[Point]) -> Vec<f64> {
 
     // sum of Euclidean distances
     for i in 1..points.len() {
-        distances.push(distances[i-1] + f64::hypot(points[i].x - points[i-1].x, points[i].y - points[i-1].y));
+        distances.push(distances[i - 1] + f64::hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y));
     }
 
     distances
+}
+
+
+pub fn thomas(a: &[f64], b: &[f64], c: &[f64], r: &[f64]) -> Vec<f64> {
+    let mut b_clone = b.to_vec();
+    let mut r_clone = r.to_vec();
+    let n = a.len() + 1;
+
+    // forward sweep
+    for i in 1..n {
+        let w = a[i-1] / b_clone[i-1];
+        b_clone[i] -= w * c[i-1];
+        r_clone[i] -= w * r_clone[i-1];
+    }
+
+    // back substitution
+    let mut x = vec![0.0; n];
+    x[n-1] = r_clone[n-1] / b_clone[n-1];
+
+    for i in (0..n-1).rev() {
+        x[i] = (r_clone[i] - c[i] * x[i+1]) / b_clone[i];
+    }
+
+    x
+}
+
+
+pub fn cyclic_thomas(a: &[f64], b: &[f64], c: &[f64], r: &[f64], alpha: f64, beta: f64) -> Vec<f64> {
+    let n = a.len() + 1;
+    let gamma = -b[0];
+    let mut b_prime = b.to_vec();
+    b_prime[0] = b[0] - gamma;
+    b_prime[n-1] = b[n-1] - alpha * beta / gamma;
+
+    let mut u = vec![0.0; n];
+    u[0] = gamma;
+    u[n-1] = alpha;
+
+    let y = thomas(a, &b_prime, c, r);
+    let q = thomas(a, &b_prime, c, &u);
+    let factor = (y[0] + (beta/gamma)*y[n-1]) / (1.0 + q[0] + (beta/gamma)*q[n-1]);
+
+    let mut x = vec![0.0; n];
+
+    for i in 0..n {
+        x[i] = y[i] - factor * q[i];
+    }
+
+    x
 }
 
 
