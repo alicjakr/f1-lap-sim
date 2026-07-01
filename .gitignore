@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# FastF1 cache and exported data
+/cache/
+/data/
