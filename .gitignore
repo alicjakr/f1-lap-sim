@@ -28,3 +28,6 @@ target
 # FastF1 cache and exported data
 /cache/
 /data/
+
+# Compiled binary in project root
+/main
