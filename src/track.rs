@@ -3,13 +3,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-struct Point {
+pub struct Point {
     x: f64,
     y: f64,
 }
 
 
-fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
+pub fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
     let mut points: Vec<Point> = Vec::new();
 
@@ -29,7 +29,7 @@ fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
 }
 
 
-fn compute_arc_lengths(points: &[Point]) -> Vec<f64> {
+pub fn compute_arc_lengths(points: &[Point]) -> Vec<f64> {
     let mut distances = Vec::with_capacity(points.len());
     distances.push(0.0);
 
@@ -42,14 +42,14 @@ fn compute_arc_lengths(points: &[Point]) -> Vec<f64> {
 }
 
 
-fn resample(points: Vec<Point>, arc_lengths: Vec<f64>, ds: f64) -> Vec<Point> {
+pub fn resample(points: &[Point], arc_lengths: Vec<f64>, ds: f64) -> Vec<Point> {
     let mut coordinates: Vec<Point > = Vec::new();
     let mut j = 0;
     let n_output = (arc_lengths.last().unwrap() / ds).floor() as usize;
 
     for i in 0..n_output {
         let t = i as f64 * ds;
-        while arc_lengths[j+1] < t {
+        while arc_lengths[j+1] < t || arc_lengths[j+1] == arc_lengths[j] {
             j += 1;
         }
         let alpha = (t - arc_lengths[j]) / (arc_lengths[j+1] - arc_lengths[j]);
@@ -64,7 +64,7 @@ fn resample(points: Vec<Point>, arc_lengths: Vec<f64>, ds: f64) -> Vec<Point> {
 }
 
 
-fn compute_curvature(points: &[Point], ds: f64) -> Vec<f64> {
+pub fn compute_curvature(points: &[Point], ds: f64) -> Vec<f64> {
     let mut kappa: Vec<f64> = Vec::with_capacity(points.len());
 
     for i in 1..points.len()-1 {
