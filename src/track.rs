@@ -29,7 +29,7 @@ pub fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
 }
 
 
-pub fn compute_arc_lengths(points: &[Point]) -> Vec<f64> {
+pub fn chord_length_params(points: &[Point]) -> Vec<f64> {
     let mut distances = Vec::with_capacity(points.len());
     distances.push(0.0);
 

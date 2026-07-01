@@ -1,13 +1,13 @@
 use std::path::Path;
-use crate::track::{compute_arc_lengths, compute_curvature, load_track_geometry, resample, Point};
+use crate::track::{chord_length_params, compute_curvature, load_track_geometry, resample, Point};
 
 mod track;
 
 fn main() {
     let track_geometry: Vec<Point> = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
-    let arc_lengths = compute_arc_lengths(&track_geometry);
-    let total_length = *arc_lengths.last().unwrap();
-    let resampled = resample(&track_geometry, arc_lengths, 1.0);
+    let t = chord_length_params(&track_geometry);
+    let total_length = *t.last().unwrap();
+    let resampled = resample(&track_geometry, t, 1.0);
     let curvature = compute_curvature(&resampled, 1.0);
 
     println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), total_length);
