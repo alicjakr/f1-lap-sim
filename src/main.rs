@@ -1,4 +1,5 @@
 use std::path::Path;
+use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, CarParams};
 use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, Point};
 
 mod track;
@@ -12,4 +13,19 @@ fn main() {
 
     println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
+
+    let top_speed: f64 = load_top_speed(Path::new("data/reference_lap.csv")).unwrap();
+    let parameters = CarParams {
+        mu_lat: 1.5,
+        mu_lon: 1.5,
+        a_max: 15.0,
+        a_brake: 40.0,
+        v_top: top_speed,
+    };
+    let corner_lims = corner_speed_limits(&curvature, &parameters);
+    let back_pass = backward_pass(&corner_lims, &parameters, 1.0);
+    let for_pass = forward_pass(&back_pass, &parameters, 1.0);
+
+    println!("Minimum velocity: {}, maximum velocity: {}, forward pass average velocity: {}", corner_lims.iter().cloned().fold(f64::INFINITY, f64::min), corner_lims.iter().cloned().fold(f64::NEG_INFINITY, f64::max), for_pass.iter().sum::<f64>() / curvature.len() as f64);
+
 }
