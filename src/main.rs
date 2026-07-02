@@ -2,6 +2,7 @@ use std::path::Path;
 use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, Point};
 
 mod track;
+mod solver;
 
 fn main() {
     let track_geometry: Vec<Point> = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
