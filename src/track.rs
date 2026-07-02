@@ -216,12 +216,28 @@ fn build_arc_length_table(segments: &[SplineSegment], steps_per_segment: usize) 
     table
 }
 
-pub fn resample(segments: &[SplineSegment], ds: f64) -> Vec<Point> {
+
+pub fn eval_spline_curvature(segments: &[SplineSegment], t: f64) -> f64 {
+    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
+    let seg = &segments[i];
+    let s = t - segments[i].t0;
+
+    let f_x = seg.bx + 2.0 * seg.cx * s + 3.0 * seg.dx * s.powi(2);
+    let f_y = seg.by + 2.0 * seg.cy * s + 3.0 * seg.dy * s.powi(2);
+    let d_x = 2.0 * seg.cx + 6.0 * seg.dx * s;
+    let d_y = 2.0 * seg.cy + 6.0 * seg.dy * s;
+    let cur = (f_x * d_y - f_y * d_x) / (f_x.powi(2) + f_y.powi(2)).powf(1.5);
+
+    cur
+}
+
+pub fn resample(segments: &[SplineSegment], ds: f64) -> (Vec<Point>, Vec<f64>) {
     let table = build_arc_length_table(segments, 20);
     let total_arc_length = table.last().unwrap().1;
     let n_output = (total_arc_length / ds).floor() as usize;
 
     let mut coordinates: Vec<Point > = Vec::new();
+    let mut curvatures: Vec<f64> = Vec::new();
 
     for i in 0..n_output {
         let s_i = i as f64 * ds;
@@ -233,28 +249,8 @@ pub fn resample(segments: &[SplineSegment], ds: f64) -> Vec<Point> {
         let t_star = t_lo + (s_i - s_lo) / (s_hi - s_lo) * (t_hi - t_lo);
 
         coordinates.push(eval_spline(segments, t_star));
+        curvatures.push(eval_spline_curvature(segments, t_star));
     }
 
-    coordinates
-}
-
-
-pub fn compute_curvature(points: &[Point], ds: f64) -> Vec<f64> {
-    let mut kappa: Vec<f64> = Vec::with_capacity(points.len());
-
-    for i in 1..points.len()-1 {
-        // first derivatives
-        let f_x = (points[i+1].x - points[i-1].x) / (2.0 * ds);
-        let f_y = (points[i+1].y - points[i-1].y) / (2.0 * ds);
-
-        // second derivatives
-        let d_x = (points[i+1].x - 2.0 * points[i].x + points[i-1].x) / ds.powi(2);
-        let d_y = (points[i+1].y - 2.0 * points[i].y + points[i-1].y) / ds.powi(2);
-
-        kappa.push((f_x*d_y - f_y*d_x) / (f_x.powi(2) + f_y.powi(2)).powf(1.5));
-    }
-
-    kappa.insert(0, kappa[0]);
-    kappa.push(*kappa.last().unwrap());
-    kappa
+    (coordinates, curvatures)
 }
