@@ -166,22 +166,73 @@ pub fn build_spline(points: &[Point], t: &[f64]) -> Vec<SplineSegment> {
 }
 
 
-pub fn resample(points: &[Point], arc_lengths: Vec<f64>, ds: f64) -> Vec<Point> {
+fn eval_spline(segments: &[SplineSegment], t: f64) -> Point {
+    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
+    let s = t - segments[i].t0;
+
+    let x =  segments[i].ax + segments[i].bx * s + segments[i].cx * s.powi(2) + segments[i].dx * s.powi(3);
+    let y =  segments[i].ay + segments[i].by * s + segments[i].cy * s.powi(2) + segments[i].dy * s.powi(3);
+
+    Point { x, y }
+}
+
+fn eval_spline_deriv(segments: &[SplineSegment], t: f64) -> (f64, f64) {
+    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
+    let s = t - segments[i].t0;
+
+    let dx = segments[i].bx + 2.0 * segments[i].cx * s + 3.0 * segments[i].dx * s.powi(2);
+    let dy = segments[i].by + 2.0 * segments[i].cy * s + 3.0 * segments[i].dy * s.powi(2);
+
+    (dx, dy)
+}
+
+
+fn build_arc_length_table(segments: &[SplineSegment], steps_per_segment: usize) -> Vec<(f64, f64)> {
+    let mut table: Vec<(f64, f64)> = Vec::with_capacity(segments.len() * steps_per_segment + 1);
+    table.push((segments[0].t0, 0.0));
+
+    let mut cumulative_s: f64 = 0.0;
+
+    for seg in segments {
+        let width = seg.h / steps_per_segment as f64;
+        for i in 0..steps_per_segment {
+            let t_a = seg.t0 + i as f64 * width;
+            let t_b = t_a + width;
+            let t_m = (t_a + t_b) / 2.0;
+            let (da_x, da_y) = eval_spline_deriv(segments, t_a);
+            let (db_x, db_y) = eval_spline_deriv(segments, t_b);
+            let (dm_x, dm_y) = eval_spline_deriv(segments, t_m);
+
+            let speed_a = f64::hypot(da_x, da_y);
+            let speed_b = f64::hypot(db_x, db_y);
+            let speed_m = f64::hypot(dm_x, dm_y);
+
+            let arc = (t_b - t_a) / 6.0 * (speed_a + 4.0 * speed_m + speed_b);
+            cumulative_s += arc;
+            table.push((t_b, cumulative_s));
+        }
+    }
+
+    table
+}
+
+pub fn resample(segments: &[SplineSegment], ds: f64) -> Vec<Point> {
+    let table = build_arc_length_table(segments, 20);
+    let total_arc_length = table.last().unwrap().1;
+    let n_output = (total_arc_length / ds).floor() as usize;
+
     let mut coordinates: Vec<Point > = Vec::new();
-    let mut j = 0;
-    let n_output = (arc_lengths.last().unwrap() / ds).floor() as usize;
 
     for i in 0..n_output {
-        let t = i as f64 * ds;
-        while arc_lengths[j+1] < t || arc_lengths[j+1] == arc_lengths[j] {
-            j += 1;
-        }
-        let alpha = (t - arc_lengths[j]) / (arc_lengths[j+1] - arc_lengths[j]);
+        let s_i = i as f64 * ds;
 
-        let x = points[j].x + alpha * (points[j+1].x - points[j].x);
-        let y = points[j].y + alpha * (points[j+1].y - points[j].y);
+        let i_table = table.partition_point(|(_, s)| *s <= s_i).saturating_sub(1);
 
-        coordinates.push( Point {x, y} );
+        let (t_lo, s_lo) = table[i_table];
+        let (t_hi, s_hi) = table[i_table + 1];
+        let t_star = t_lo + (s_i - s_lo) / (s_hi - s_lo) * (t_hi - t_lo);
+
+        coordinates.push(eval_spline(segments, t_star));
     }
 
     coordinates
