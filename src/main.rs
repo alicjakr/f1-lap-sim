@@ -1,5 +1,5 @@
 use std::path::Path;
-use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, CarParams};
+use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, lap_time, CarParams};
 use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, Point};
 
 mod track;
@@ -28,4 +28,8 @@ fn main() {
 
     println!("Minimum velocity: {}, maximum velocity: {}, forward pass average velocity: {}", corner_lims.iter().cloned().fold(f64::INFINITY, f64::min), corner_lims.iter().cloned().fold(f64::NEG_INFINITY, f64::max), for_pass.iter().sum::<f64>() / curvature.len() as f64);
 
+    let lap_time = lap_time(&for_pass, 1.0);
+    let minutes = (lap_time / 60.0) as u32;
+    let seconds = lap_time % 60.0;
+    println!("Lap time: {}:{:06.3}", minutes, seconds);
 }

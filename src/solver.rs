@@ -69,3 +69,8 @@ pub fn forward_pass(v_backward: &[f64], params: &CarParams, ds: f64) -> Vec<f64>
 
     v
 }
+
+
+pub fn lap_time(velocity: &[f64], ds: f64) -> f64 {
+    velocity.iter().map(|v| ds / v).sum()
+}
