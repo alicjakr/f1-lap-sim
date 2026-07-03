@@ -5,7 +5,7 @@ sim = pd.read_csv("data/simulated_lap.csv")
 ref = pd.read_csv("data/reference_lap.csv")
 
 plt.plot(ref["Distance"], ref["Speed"], label="Reference (HAM 2018)")
-plt.plot(sim["Distance"], sim["Speed [km/h]"], label="Simulated")
+plt.plot(sim["Distance"], sim["Speed"], label="Simulated")
 plt.xlabel("Distance [m]")
 plt.ylabel("Speed [km/h]")
 plt.legend()
