@@ -80,12 +80,12 @@ pub fn export_velocity_csv(velocity: &[f64], ds: f64, path: &Path) -> Result<(),
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
-    writeln!(writer, "Distance, Speed [km/h]")?;
+    writeln!(writer, "Distance,Speed")?;
 
     for i in 0..velocity.len() {
         let distance = i as f64 * ds;
         let speed = velocity[i] * 3.6;
-        writeln!(writer, "{}, {}", distance, speed)?;
+        writeln!(writer, "{},{}", distance, speed)?;
     }
 
     Ok(())
