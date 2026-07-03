@@ -1,5 +1,5 @@
 use std::path::Path;
-use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, lap_time, CarParams};
+use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, lap_time, CarParams, export_velocity_csv};
 use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, Point};
 
 mod track;
@@ -32,4 +32,6 @@ fn main() {
     let minutes = (lap_time / 60.0) as u32;
     let seconds = lap_time % 60.0;
     println!("Lap time: {}:{:06.3}", minutes, seconds);
+
+    export_velocity_csv(&for_pass, 1.0, Path::new("data/simulated_lap.csv")).unwrap();
 }

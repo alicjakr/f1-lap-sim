@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 const G: f64 = 9.81;
@@ -73,4 +73,20 @@ pub fn forward_pass(v_backward: &[f64], params: &CarParams, ds: f64) -> Vec<f64>
 
 pub fn lap_time(velocity: &[f64], ds: f64) -> f64 {
     velocity.iter().map(|v| ds / v).sum()
+}
+
+
+pub fn export_velocity_csv(velocity: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    writeln!(writer, "Distance, Speed [km/h]")?;
+
+    for i in 0..velocity.len() {
+        let distance = i as f64 * ds;
+        let speed = velocity[i] * 3.6;
+        writeln!(writer, "{}, {}", distance, speed)?;
+    }
+
+    Ok(())
 }
