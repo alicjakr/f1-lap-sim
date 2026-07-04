@@ -8,9 +8,11 @@ const G: f64 = 9.81;
 pub struct CarParams {
     pub mu_lat: f64,     // lateral friction coefficient
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
-    pub a_max: f64,      // peak longitudinal acceleration (m/s²)
     pub a_brake: f64,    // peak braking deceleration (m/s²)
     pub v_top: f64,      // hard speed cap (m/s)
+    pub c_l: f64,  // downforce coefficient per unit mass (m⁻¹)
+    pub c_d: f64,  // drag coefficient per unit mass (m⁻¹)
+    pub p_engine: f64,
 }
 
 
@@ -39,7 +41,12 @@ pub fn corner_speed_limits(curvature: &[f64], params: &CarParams) -> Vec<f64> {
     let mut limits: Vec<f64> = vec![0.0; curvature.len()];
 
     for i in 0..curvature.len() {
-        limits[i] = (params.mu_lat * G / curvature[i].abs()).sqrt().min(params.v_top)
+        let denom: f64 = curvature[i].abs() - params.mu_lat * params.c_l;
+        if denom <= 0.0 {
+            limits[i] = params.v_top;
+        } else {
+            limits[i] = (params.mu_lat * G / denom).sqrt().min(params.v_top);
+        }
     }
 
     limits
@@ -50,8 +57,9 @@ pub fn backward_pass(v_corner: &[f64], params: &CarParams, ds: f64) -> Vec<f64> 
 
     for _ in 0..2 {
         for i in(0..v_corner.len()-1).rev() {
+            let a_brake_total = params.a_brake + params.c_d * v[i+1].powi(2);
             // speed at i can't be so high that you can't brake down to v[i+1] within ds metres
-            v[i] = v[i].min((v[i+1].powi(2) + 2.0 * params.a_brake * ds).sqrt())
+            v[i] = v[i].min((v[i+1].powi(2) + 2.0 * a_brake_total * ds).sqrt())
         }
     }
 
@@ -63,7 +71,10 @@ pub fn forward_pass(v_backward: &[f64], params: &CarParams, ds: f64) -> Vec<f64>
 
     for _ in 0..2 {
         for i in 1..v_backward.len() {
-            v[i] = v[i].min((v[i-1].powi(2) + 2.0 * params.a_max * ds).sqrt())
+            let a_traction = params.mu_lon * (G + params.c_l * v[i-1].powi(2));
+            let a_power = params.p_engine / v[i-1];
+            let a_available = (a_traction.min(a_power) - params.c_d * v[i-1].powi(2)).max(0.0);
+            v[i] = v[i].min((v[i-1].powi(2) + 2.0 * a_available * ds).sqrt())
         }
     }
 

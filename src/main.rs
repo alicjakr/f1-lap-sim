@@ -18,9 +18,11 @@ fn main() {
     let parameters = CarParams {
         mu_lat: 1.5,
         mu_lon: 1.5,
-        a_max: 15.0,
         a_brake: 40.0,
         v_top: top_speed,
+        c_l: 0.008,
+        c_d: 0.0015,
+        p_engine: 1200.0,
     };
     let corner_lims = corner_speed_limits(&curvature, &parameters);
     let back_pass = backward_pass(&corner_lims, &parameters, 1.0);

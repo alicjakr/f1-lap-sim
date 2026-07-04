@@ -31,3 +31,6 @@ target
 
 # Compiled binary in project root
 /main
+
+# macOS metadata
+.DS_Store
