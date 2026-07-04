@@ -17,8 +17,8 @@ SESSION_NAME = "Singapore"
 SESSION_TYPE = "Q"
 DRIVER = "HAM"
 
-os.makedirs("data", exist_ok=True)
-os.makedirs("cache", exist_ok=True)
+os.makedirs("../data", exist_ok=True)
+os.makedirs("../cache", exist_ok=True)
 
 fastf1.Cache.enable_cache("cache")
 
