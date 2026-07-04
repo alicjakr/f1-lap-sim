@@ -1,6 +1,6 @@
 use std::path::Path;
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, lap_time, CarParams, export_velocity_csv};
-use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, Point};
+use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, smooth_curvature, Point};
 
 mod track;
 mod solver;
@@ -10,6 +10,7 @@ fn main() {
     let t = chord_length_params(&track_geometry);
     let segments = build_spline(&track_geometry, &t);
     let (resampled, curvature) = resample(&segments, 1.0);
+    let curvature = smooth_curvature(&curvature, 10);
 
     println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);

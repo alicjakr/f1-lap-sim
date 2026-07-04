@@ -254,3 +254,20 @@ pub fn resample(segments: &[SplineSegment], ds: f64) -> (Vec<Point>, Vec<f64>) {
 
     (coordinates, curvatures)
 }
+
+
+pub fn smooth_curvature(curvature: &[f64], window: usize) -> Vec<f64> {
+    let half: usize = window / 2;
+    let n = curvature.len();
+    let mut res = vec![0.0; n];
+
+    for i in 0..n {
+        let mut sum: f64 = 0.0;
+        for j in 0..window {
+            sum += curvature[(i + j + n - half) % n];
+        }
+        res[i] = sum / window as f64;
+    }
+
+    res
+}
