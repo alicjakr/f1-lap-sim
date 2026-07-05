@@ -26,8 +26,8 @@ fn main() {
         p_engine: 1200.0,
     };
     let corner_lims = corner_speed_limits(&curvature, &parameters);
-    let back_pass = backward_pass(&corner_lims, &parameters, 1.0);
-    let for_pass = forward_pass(&back_pass, &parameters, 1.0);
+    let back_pass = backward_pass(&curvature, &corner_lims, &parameters, 1.0);
+    let for_pass = forward_pass(&curvature, &back_pass, &parameters, 1.0);
 
     println!("Minimum velocity: {}, maximum velocity: {}, forward pass average velocity: {}", corner_lims.iter().cloned().fold(f64::INFINITY, f64::min), corner_lims.iter().cloned().fold(f64::NEG_INFINITY, f64::max), for_pass.iter().sum::<f64>() / curvature.len() as f64);
 

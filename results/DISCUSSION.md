@@ -5,7 +5,7 @@
 
 ---
 
-## Model progression
+## Model progression (v1)
 
 The simulator was developed iteratively. Each stage added a physical component and reduced the lap time error.
 
@@ -85,6 +85,48 @@ Not modelled. On a qualifying lap (fresh tires, maximum grip), this is a negligi
 
 ---
 
-## Conclusion
+## Conclusion (v1)
 
-The final model (1:42.969) is within 7 seconds of the reference pole lap (1:36.015), a 7% error, using only mechanical grip, a simplified aero model, and a power curve. The track structure is reproduced correctly throughout. The primary remaining gap is the friction ellipse, which would require a more coupled solver. The model is a sound foundation for sensitivity analysis: lap time response to changes in `c_l`, `μ_lat`, or `P_specific` can be read directly from a parameter sweep.
+The final v1 model (1:42.969) is within 7 seconds of the reference pole lap (1:36.015), a 7% error, using only mechanical grip, a simplified aero model, and a power curve. The track structure is reproduced correctly throughout. The primary remaining gap is the friction ellipse, which would require a more coupled solver. The model is a sound foundation for sensitivity analysis: lap time response to changes in `c_l`, `μ_lat`, or `P_specific` can be read directly from a parameter sweep.
+
+---
+
+---
+
+# V2 — Friction Ellipse
+
+## What changed
+
+The two-pass solver now couples lateral and longitudinal grip through the friction ellipse constraint:
+
+**(a_lat / μ_lat·g_eff)² + (a_lon / μ_lon·g_eff)² ≤ 1**
+
+At each point, the lateral load already carried (`a_lat = v²·|κ|`) reduces the remaining longitudinal budget:
+
+```
+a_lon = μ_lon · g_eff · √(1 − (a_lat / μ_lat·g_eff)²)
+```
+
+This affects both passes: forward pass (acceleration out of corners) and backward pass (braking into corners). `a_brake` is retained as a soft floor scaled by `(1 − ratio)`, representing that real tire friction ellipses are not perfectly sharp — some longitudinal capacity remains even at high lateral load.
+
+## Results
+
+| Model | Lap time | Delta | Error |
+|---|---|---|---|
+| Reference (HAM 2018 Q) | 1:36.015 | — | — |
+| V1 final (independent axes) | 1:42.969 | +6.95 s | +7% |
+| V2 (friction ellipse) | 1:47.671 | +11.7 s | +12% |
+
+![V2 friction ellipse](comparison_v2_ellipse.png)
+
+## Discussion
+
+The friction ellipse increases the lap time by ~5 seconds relative to v1. This is physically correct: the v1 model allowed full braking while cornering and full acceleration while cornering, which overstated performance in the combined-load zones (turn-in and exit). The ellipse correctly penalises those zones.
+
+The reference lap (1:36) is driven by Hamilton, who optimally uses the friction ellipse — trail braking into corners, blending lateral and longitudinal grip continuously through the corner. The two-pass algorithm cannot replicate this: it assumes a discrete sequence of brake → corner → accelerate. A skilled driver effectively "extends" the friction budget by never being fully at the lateral or longitudinal limit exclusively.
+
+The remaining 12% error therefore has two components:
+1. **Physics gap** — parameters and model structure (same issues as v1: curvature noise, no tire model)
+2. **Algorithmic gap** — the two-pass cannot recover the time a real driver gains by optimally blending lat/lon grip across the full corner arc; this requires an optimal control formulation (minimum-time problem) rather than a greedy two-pass sweep
+
+The algorithmic gap is fundamental to the two-pass approach and cannot be closed without replacing the solver.

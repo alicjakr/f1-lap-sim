@@ -34,3 +34,6 @@ target
 
 # macOS metadata
 .DS_Store
+
+# Python virtual environment
+.venv/
