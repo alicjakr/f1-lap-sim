@@ -166,6 +166,165 @@ pub fn build_spline(points: &[Point], t: &[f64]) -> Vec<SplineSegment> {
 }
 
 
+fn find_span( t_val: f64, m: usize, knots: &[f64]) -> usize {
+    if t_val >= knots[m] {
+        return m - 1;
+    }
+    knots.partition_point(|&k| k <= t_val) - 1
+}
+
+fn basis_fns(t_val: f64, span: usize, p: usize, knots: &[f64]) -> Vec<f64> {
+    let mut n_val: Vec<f64> = vec![0.0; p + 1];
+    n_val[0] = 1.0;
+    let mut left: Vec<f64> = vec![0.0; p + 1];
+    let mut right: Vec<f64> = vec![0.0; p + 1];
+
+    for i in 1..=p {
+        left[i] = t_val - knots[span + 1 - i];
+        right[i] = knots[span + i] - t_val;
+
+        let mut saved = 0.0;
+        for r in 0..i {
+            let denom = right[r+1] + left[i-r];
+            let temp = n_val[r] / denom;
+            n_val[r] = saved + right[r+1] * temp;
+            saved = left[i-r] * temp;
+        }
+
+        n_val[i] = saved;
+    }
+
+    n_val
+}
+
+fn gauss_solve(mut a: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
+    let m = a.len();
+    for col in 0..m {
+        // partial pivot
+        let mut max_row = col;
+        for row in col+1..m {
+            if a[row][col].abs() > a[max_row][col].abs() {
+                max_row = row;
+            }
+        }
+        a.swap(col, max_row);
+        rhs.swap(col, max_row);
+
+        // eliminate below
+        for row in col+1..m {
+            let factor = a[row][col] / a[col][col];
+            for j in col..m {
+                a[row][j] -= factor * a[col][j];
+            }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+
+    let mut x: Vec<f64> = vec![0.0; m];
+    for i in (0..m).rev() {
+        x[i] = rhs[i];
+        for j in 0..m {
+            if j > i {
+                x[i] -= a[i][j] * x[j];
+            }
+        }
+        x[i] = x[i] / a[i][i];
+    }
+
+    x
+}
+
+pub fn smooth_points(points: &[Point], t: &[f64], lambda: f64) -> Vec<Point> {
+    let n = points.len();
+    let p = 3;
+    let m = (n / 4).clamp(p + 1, 180);
+
+    let t_min = t[0];
+    let t_max = *t.last().unwrap();
+
+    let mut knot_vec = vec![t[0]; m + 4];
+    for i in p + 1..m {
+        knot_vec[i] = t_min + (i - p) as f64 * (t_max - t_min) / (m - p) as f64;
+    }
+
+    for i in m..m + p + 1 {
+        knot_vec[i] = t_max;
+    }
+
+    let mut b_mat: Vec<Vec<f64>> = vec![vec![0.0; m]; n];
+    for i in 0..n {
+        let span = find_span(t[i], m, &knot_vec);
+        let n_vals = basis_fns(t[i], span, p, &knot_vec);
+
+        for j in 0..=p {
+            b_mat[i][span - p + j] = n_vals[j];
+        }
+    }
+
+    let mut btb_mat: Vec<Vec<f64>> = vec![vec![0.0; m]; m];
+    for i in 0..m {
+        for j in 0..m {
+            if i <= j {
+                for k in 0..n {
+                    btb_mat[i][j] += b_mat[k][i] * b_mat[k][j];
+                }
+            }
+        }
+
+        for j in 0..m {
+            if i < j {
+                btb_mat[j][i] = btb_mat[i][j];
+            }
+        }
+    }
+
+    let mut dtd_mat: Vec<Vec<f64>> = vec![vec![0.0; m]; m];
+    for k in 0..m-2 {
+        let col_pairs = [(k, 1.0), (k+1, -2.0), (k+2, 1.0)];
+        for a in 0..3 {
+            for b in 0..3 {
+                let (col_a, coeff_a) = col_pairs[a];
+                let (col_b, coeff_b) = col_pairs[b];
+
+                dtd_mat[col_a][col_b] += coeff_a * coeff_b;
+            }
+        }
+    }
+
+    let mut a_mat: Vec<Vec<f64>> = vec![vec![0.0; m]; m];
+    for i in 0..m {
+        for j in 0..m {
+            a_mat[i][j] = btb_mat[i][j] + lambda * dtd_mat[i][j];
+        }
+    }
+
+    let mut rhs_x: Vec<f64> = vec![0.0; m];
+    let mut rhs_y: Vec<f64> = vec![0.0; m];
+    for i in 0..n {
+        for j in 0..m {
+            rhs_x[j] += b_mat[i][j] * points[i].x;
+            rhs_y[j] += b_mat[i][j] * points[i].y;
+        }
+    }
+
+    let cx = gauss_solve(a_mat.clone(), rhs_x);
+    let cy = gauss_solve(a_mat, rhs_y);
+    let mut res: Vec<Point> = Vec::new();
+
+    for i in 0..n {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for j in 0..m {
+            x += b_mat[i][j] * cx[j];
+            y += b_mat[i][j] * cy[j];
+        }
+        res.push(Point {x, y});
+    }
+
+    res
+}
+
+
 fn eval_spline(segments: &[SplineSegment], t: f64) -> Point {
     let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
     let s = t - segments[i].t0;
