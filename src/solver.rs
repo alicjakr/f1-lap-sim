@@ -55,16 +55,13 @@ pub fn corner_speed_limits(curvature: &[f64], params: &CarParams) -> Vec<f64> {
 pub fn backward_pass(curvature: &[f64], v_corner: &[f64], params: &CarParams, ds: f64) -> Vec<f64> {
     let mut v = v_corner.to_vec();
 
-    for _ in 0..2 {
-        for i in(0..v_corner.len()-1).rev() {
-            let g_eff = G + params.c_l * v[i].powi(2);
-            let a_lat = v[i].powi(2) * curvature[i].abs();
-            let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
-            let a_lon = params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt();
-            // fixed minimum braking regardless of ratio
-            let a_brake_eff = (a_lon.max(params.a_brake * 0.3) + params.c_d * v[i+1].powi(2)).max(0.0);            // speed at i can't be so high that you can't brake down to v[i+1] within ds metres
-            v[i] = v[i].min((v[i+1].powi(2) + 2.0 * a_brake_eff * ds).sqrt())
-        }
+    for i in (0..v_corner.len()-1).rev() {
+        let g_eff = G + params.c_l * v[i].powi(2);
+        let a_lat = v[i].powi(2) * curvature[i].abs();
+        let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
+        let a_lon = params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt();
+        let a_brake_eff = (a_lon.max(params.a_brake * 0.3) + params.c_d * v[i+1].powi(2)).max(0.0);
+        v[i] = v[i].min((v[i+1].powi(2) + 2.0 * a_brake_eff * ds).sqrt())
     }
 
     v
@@ -73,17 +70,13 @@ pub fn backward_pass(curvature: &[f64], v_corner: &[f64], params: &CarParams, ds
 pub fn forward_pass(curvature: &[f64], v_backward: &[f64], params: &CarParams, ds: f64) -> Vec<f64> {
     let mut v = v_backward.to_vec();
 
-    for _ in 0..2 {
-        for i in 1..v_backward.len() {
-            let g_eff = G + params.c_l * v[i-1].powi(2);
-            let a_lat = v[i-1].powi(2) * curvature[i-1].abs();
-            let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
-            // at least 10% of traction capacity at all times
-            let a_lon = (params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt()).max(params.mu_lon * g_eff * 0.1);
-            let a_available = (a_lon.min(params.p_engine / v[i-1]) - params.c_d * v[i-1].powi(2)).max(0.0);
-
-            v[i] = v[i].min((v[i-1].powi(2) + 2.0 * a_available * ds).sqrt())
-        }
+    for i in 1..v_backward.len() {
+        let g_eff = G + params.c_l * v[i-1].powi(2);
+        let a_lat = v[i-1].powi(2) * curvature[i-1].abs();
+        let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
+        let a_lon = (params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt()).max(params.mu_lon * g_eff * 0.1);
+        let a_available = (a_lon.min(params.p_engine / v[i-1]) - params.c_d * v[i-1].powi(2)).max(0.0);
+        v[i] = v[i].min((v[i-1].powi(2) + 2.0 * a_available * ds).sqrt())
     }
 
     v
