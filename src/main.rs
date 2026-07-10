@@ -10,14 +10,14 @@ fn main() {
     let t = chord_length_params(&track_geometry);
     let segments = build_spline(&track_geometry, &t);
     let (resampled, curvature) = resample(&segments, 1.0);
-    let curvature = smooth_curvature(&curvature, 10);
+    let curvature = smooth_curvature(&curvature, 35);
 
     println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
     let top_speed: f64 = load_top_speed(Path::new("data/reference_lap.csv")).unwrap();
     let parameters = CarParams {
-        mu_lat: 1.5,
+        mu_lat: 1.63,
         mu_lon: 1.5,
         a_brake: 40.0,
         v_top: top_speed,
