@@ -1,6 +1,6 @@
 use std::path::Path;
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, load_top_speed, lap_time, CarParams, export_velocity_csv};
-use crate::track::{build_spline, chord_length_params, load_track_geometry, resample, smooth_curvature, Point};
+use crate::track::{build_spline, chord_length_params, export_curvature_csv, load_track_geometry, resample, smooth_curvature, Point};
 
 mod track;
 mod solver;
@@ -9,8 +9,9 @@ fn main() {
     let track_geometry: Vec<Point> = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
     let t = chord_length_params(&track_geometry);
     let segments = build_spline(&track_geometry, &t);
-    let (resampled, curvature) = resample(&segments, 1.0);
-    let curvature = smooth_curvature(&curvature, 35);
+    let (resampled, raw_curvature) = resample(&segments, 1.0);
+    let curvature = smooth_curvature(&raw_curvature, 35);
+    export_curvature_csv(&raw_curvature, &curvature, 1.0, Path::new("data/curvature_debug.csv")).unwrap();
 
     println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
@@ -23,7 +24,7 @@ fn main() {
         v_top: top_speed,
         c_l: 0.008,
         c_d: 0.0015,
-        p_engine: 1200.0,
+        p_engine: 921.0,
     };
     let corner_lims = corner_speed_limits(&curvature, &parameters);
     let mut v = corner_lims.clone();

@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 pub struct Point {
@@ -254,6 +254,21 @@ pub fn resample(segments: &[SplineSegment], ds: f64) -> (Vec<Point>, Vec<f64>) {
     }
 
     (coordinates, curvatures)
+}
+
+
+pub fn export_curvature_csv(raw: &[f64], smoothed: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    writeln!(writer, "Distance,RawCurvature,SmoothedCurvature")?;
+
+    for i in 0..raw.len() {
+        let distance = i as f64 * ds;
+        writeln!(writer, "{},{},{}", distance, raw[i], smoothed[i])?;
+    }
+
+    Ok(())
 }
 
 

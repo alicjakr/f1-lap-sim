@@ -10,9 +10,9 @@ pub struct CarParams {
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
     pub a_brake: f64,    // peak braking deceleration (m/s²)
     pub v_top: f64,      // hard speed cap (m/s)
-    pub c_l: f64,  // downforce coefficient per unit mass (m⁻¹)
-    pub c_d: f64,  // drag coefficient per unit mass (m⁻¹)
-    pub p_engine: f64,
+    pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
+    pub c_d: f64,        // drag coefficient per unit mass (m⁻¹)
+    pub p_engine: f64,   // engine power
 }
 
 
