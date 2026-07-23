@@ -8,23 +8,18 @@ pub struct Point {
     y: f64,
 }
 
-pub struct SplineSegment {
-    pub ax: f64,
-    pub bx: f64,
-    pub cx: f64,
-    pub dx: f64,               // cubic coefficients for x
-    pub ay: f64,
-    pub by: f64,
-    pub cy: f64,
-    pub dy: f64,               // cubic coefficients for y
-    pub t0: f64,               // parameter value at segment start
-    pub h: f64,                // segment length in parameter space
-}
 
-
-pub fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
+// Returns (points, distances). Distance is FastF1's own telemetry channel, not a
+// chord length recomputed from X/Y: at high speed, position samples can go stale or
+// repeat between GPS fixes, so summing Euclidean distance between consecutive points
+// systematically undercounts true distance (badly and non-uniformly on fast tracks).
+// FastF1's Distance channel is integrated from Speed instead, so it doesn't have that
+// problem, and it's what reference_lap.csv's own distance axis is built from too —
+// using it here keeps both files on the same distance axis.
+pub fn load_track_geometry(path: &Path) -> Result<(Vec<Point>, Vec<f64>), Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
     let mut points: Vec<Point> = Vec::new();
+    let mut distances: Vec<f64> = Vec::new();
 
     let mut lines = reader.lines();
     lines.next(); // skip header
@@ -32,212 +27,245 @@ pub fn load_track_geometry(path: &Path) -> Result<Vec<Point>, Box<dyn Error>> {
     for line in lines {
         let line = line?;
         let mut cols = line.split(',');
+        let d = cols.next().ok_or("missing distance")?.parse::<f64>()?;
         let x = cols.next().ok_or("missing x")?.parse::<f64>()?;
         let y = cols.next().ok_or("missing y")?.parse::<f64>()?;
+        distances.push(d);
         points.push(Point {x, y});
     }
 
-    Ok(points)
-
+    Ok((points, distances))
 }
 
 
-pub fn chord_length_params(points: &[Point]) -> Vec<f64> {
-    let mut distances = Vec::with_capacity(points.len());
-    distances.push(0.0);
-
-    // sum of Euclidean distances
-    for i in 1..points.len() {
-        distances.push(distances[i - 1] + f64::hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y));
-    }
-
-    distances
-}
-
-
-pub fn thomas(a: &[f64], b: &[f64], c: &[f64], r: &[f64]) -> Vec<f64> {
-    let mut b_clone = b.to_vec();
-    let mut r_clone = r.to_vec();
-    let n = a.len() + 1;
-
-    // forward sweep
-    for i in 1..n {
-        let w = a[i-1] / b_clone[i-1];
-        b_clone[i] -= w * c[i-1];
-        r_clone[i] -= w * r_clone[i-1];
-    }
-
-    // back substitution
-    let mut x = vec![0.0; n];
-    x[n-1] = r_clone[n-1] / b_clone[n-1];
-
-    for i in (0..n-1).rev() {
-        x[i] = (r_clone[i] - c[i] * x[i+1]) / b_clone[i];
-    }
-
-    x
-}
-
-
-pub fn cyclic_thomas(a: &[f64], b: &[f64], c: &[f64], r: &[f64], alpha: f64, beta: f64) -> Vec<f64> {
-    let n = a.len() + 1;
-    let gamma = -b[0];
-    let mut b_prime = b.to_vec();
-    b_prime[0] = b[0] - gamma;
-    b_prime[n-1] = b[n-1] - alpha * beta / gamma;
-
-    let mut u = vec![0.0; n];
-    u[0] = gamma;
-    u[n-1] = alpha;
-
-    let y = thomas(a, &b_prime, c, r);
-    let q = thomas(a, &b_prime, c, &u);
-    let factor = (y[0] + (beta/gamma)*y[n-1]) / (1.0 + q[0] + (beta/gamma)*q[n-1]);
-
-    let mut x = vec![0.0; n];
-
-    for i in 0..n {
-        x[i] = y[i] - factor * q[i];
-    }
-
-    x
-}
-
-
-pub fn build_spline(points: &[Point], t: &[f64]) -> Vec<SplineSegment> {
+// Total arc length of the closed loop: FastF1's own distance up to the last sample,
+// plus a short closing segment back to the first point. That closing chord is only
+// trustworthy if the source lap's position telemetry is clean end-to-end — see the
+// LAP_NUMBER note in export_track.py; a lap with a stale/gapped position channel can
+// make this chord wildly wrong (hundreds of meters) rather than a small correction.
+pub fn total_length(points: &[Point], t: &[f64]) -> f64 {
     let n = points.len();
-    let mut b = vec![0.0; n];
-    let mut h = vec![0.0; n];
-    let total_chord_length = t[n-1] + f64::hypot(points[0].x - points[n-1].x, points[0].y - points[n-1].y);
-
-    for i in 0..n-1 {
-        h[i] = t[i+1] - t[i];
-    }
-    h[n-1] = total_chord_length - t[n-1];
-
-    b[0] = 2.0 * (h[n-1] + h[0]);
-
-    for i in 1..n {
-        b[i] = 2.0 * (h[i-1] + h[i]);
-    }
-
-    let mut a = vec![0.0; n-1];
-    let mut c = vec![0.0; n-1];
-
-    for i in 0..n-1 {
-        a[i] = h[i];
-        c[i] = h[i];
-    }
-
-    let alpha = h[n-1];
-    let beta = h[n-1];
-
-    let mut r_x = vec![0.0; n];
-    let mut r_y = vec![0.0; n];
-
-    for i in 0..n {
-        let prev = if i == 0 { n - 1 } else { i - 1 };
-        let next = (i+1) % n;
-        r_x[i] = 6.0 *  ((points[next].x - points[i].x) / h[i] - (points[i].x - points[prev].x) / h[prev]);
-        r_y[i] = 6.0 *  ((points[next].y - points[i].y) / h[i] - (points[i].y - points[prev].y) / h[prev]);
-    }
-
-    let m_x = cyclic_thomas(&a, &b, &c, &r_x, alpha, beta);
-    let m_y = cyclic_thomas(&a, &b, &c, &r_y, alpha, beta);
-
-    let mut segments: Vec<SplineSegment> = Vec::new();
-    for i in 0..n {
-        let next = (i+1) % n;
-        segments.push(SplineSegment {
-            ax: points[i].x,
-            bx: (points[next].x - points[i].x) / h[i] - h[i] * (2.0 * m_x[i] + m_x[next]) / 6.0,
-            cx: m_x[i] / 2.0,
-            dx: (m_x[next] - m_x[i]) / (6.0 * h[i]),
-            ay: points[i].y,
-            by: (points[next].y - points[i].y) / h[i] - h[i] * (2.0 * m_y[i] + m_y[next]) / 6.0,
-            cy: m_y[i] / 2.0,
-            dy: (m_y[next] - m_y[i]) / (6.0 * h[i]),
-            t0: t[i],
-            h: h[i],
-        });
-    }
-
-    segments
+    t[n - 1] + f64::hypot(points[0].x - points[n - 1].x, points[0].y - points[n - 1].y)
 }
 
 
+// --- Periodic cubic P-spline geometry smoothing ---
+//
+// The raw centerline is noisy GPS telemetry. Interpolating a spline exactly through
+// every noisy point amplifies that noise into curvature (large, spurious curvature
+// spikes at sharp local perturbations). Instead, fit a *smoothing* spline: far fewer
+// control points than data points (m << n), found by penalized least squares, so the
+// fitted curve can't reproduce point-to-point noise in the first place. The track is a
+// closed loop, so both the basis and the roughness penalty wrap around periodically —
+// otherwise the start/finish line would show the same kind of seam artifact the
+// velocity solver had before it was made to run over padded laps.
 
-fn eval_spline(segments: &[SplineSegment], t: f64) -> Point {
-    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
-    let s = t - segments[i].t0;
-
-    let x =  segments[i].ax + segments[i].bx * s + segments[i].cx * s.powi(2) + segments[i].dx * s.powi(3);
-    let y =  segments[i].ay + segments[i].by * s + segments[i].cy * s.powi(2) + segments[i].dy * s.powi(3);
-
-    Point { x, y }
+// Uniform cubic B-spline blending weights and derivatives, for local parameter u in [0,1).
+fn bspline_basis(u: f64) -> [f64; 4] {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    [
+        (1.0 - u).powi(3) / 6.0,
+        (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0,
+        (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0,
+        u3 / 6.0,
+    ]
 }
 
-fn eval_spline_deriv(segments: &[SplineSegment], t: f64) -> (f64, f64) {
-    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
-    let s = t - segments[i].t0;
+fn bspline_basis_d1(u: f64) -> [f64; 4] {
+    [
+        -(1.0 - u).powi(2) / 2.0,
+        (3.0 * u * u - 4.0 * u) / 2.0,
+        (-3.0 * u * u + 2.0 * u + 1.0) / 2.0,
+        u * u / 2.0,
+    ]
+}
 
-    let dx = segments[i].bx + 2.0 * segments[i].cx * s + 3.0 * segments[i].dx * s.powi(2);
-    let dy = segments[i].by + 2.0 * segments[i].cy * s + 3.0 * segments[i].dy * s.powi(2);
-
-    (dx, dy)
+fn bspline_basis_d2(u: f64) -> [f64; 4] {
+    [1.0 - u, 3.0 * u - 2.0, -3.0 * u + 1.0, u]
 }
 
 
-fn build_arc_length_table(segments: &[SplineSegment], steps_per_segment: usize) -> Vec<(f64, f64)> {
-    let mut table: Vec<(f64, f64)> = Vec::with_capacity(segments.len() * steps_per_segment + 1);
-    table.push((segments[0].t0, 0.0));
+pub struct PeriodicBSpline {
+    cx: Vec<f64>,
+    cy: Vec<f64>,
+    m: usize,
+    h: f64,       // uniform knot spacing = length / m
+    length: f64,  // total arc length of the closed loop
+}
+
+impl PeriodicBSpline {
+    fn segment_and_u(&self, t: f64) -> (usize, f64) {
+        let tm = t.rem_euclid(self.length);
+        let raw = tm / self.h;
+        let seg = (raw.floor() as usize).min(self.m - 1);
+        (seg, raw - seg as f64)
+    }
+
+    // Control point index, wrapped periodically around the m control points.
+    fn ctrl(&self, idx: isize) -> (f64, f64) {
+        let m = self.m as isize;
+        let j = ((idx % m) + m) % m;
+        (self.cx[j as usize], self.cy[j as usize])
+    }
+
+    fn blend(&self, seg: usize, weights: [f64; 4]) -> (f64, f64) {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for k in 0..4 {
+            let (cx, cy) = self.ctrl(seg as isize - 1 + k as isize);
+            x += weights[k] * cx;
+            y += weights[k] * cy;
+        }
+        (x, y)
+    }
+
+    pub fn eval(&self, t: f64) -> (f64, f64) {
+        let (seg, u) = self.segment_and_u(t);
+        self.blend(seg, bspline_basis(u))
+    }
+
+    pub fn eval_deriv(&self, t: f64) -> (f64, f64) {
+        let (seg, u) = self.segment_and_u(t);
+        let (dx, dy) = self.blend(seg, bspline_basis_d1(u));
+        (dx / self.h, dy / self.h)
+    }
+
+    pub fn eval_deriv2(&self, t: f64) -> (f64, f64) {
+        let (seg, u) = self.segment_and_u(t);
+        let (ddx, ddy) = self.blend(seg, bspline_basis_d2(u));
+        (ddx / (self.h * self.h), ddy / (self.h * self.h))
+    }
+
+    pub fn curvature(&self, t: f64) -> f64 {
+        let (dx, dy) = self.eval_deriv(t);
+        let (ddx, ddy) = self.eval_deriv2(t);
+        (dx * ddy - dy * ddx) / (dx * dx + dy * dy).powf(1.5)
+    }
+}
+
+
+fn gauss_solve(mut a: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
+    let m = a.len();
+    for col in 0..m {
+        let mut max_row = col;
+        for row in col + 1..m {
+            if a[row][col].abs() > a[max_row][col].abs() {
+                max_row = row;
+            }
+        }
+        a.swap(col, max_row);
+        rhs.swap(col, max_row);
+
+        for row in col + 1..m {
+            let factor = a[row][col] / a[col][col];
+            for j in col..m {
+                a[row][j] -= factor * a[col][j];
+            }
+            rhs[row] -= factor * rhs[col];
+        }
+    }
+
+    let mut x = vec![0.0; m];
+    for i in (0..m).rev() {
+        x[i] = rhs[i];
+        for j in (i + 1)..m {
+            x[i] -= a[i][j] * x[j];
+        }
+        x[i] /= a[i][i];
+    }
+
+    x
+}
+
+
+// Fit a periodic P-spline with m control points to n (>> m) raw points, minimizing
+// squared residual plus lambda times a periodic second-difference roughness penalty
+// on the control polygon. Solved via the normal equations (B^T B + lambda D^T D) c = B^T y,
+// accumulated directly per data point rather than ever forming the dense n x m design
+// matrix B.
+pub fn fit_periodic_bspline(points: &[Point], t: &[f64], length: f64, m: usize, lambda: f64) -> PeriodicBSpline {
+    let h = length / m as f64;
+
+    let mut btb = vec![vec![0.0; m]; m];
+    let mut btx = vec![0.0; m];
+    let mut bty = vec![0.0; m];
+
+    for (i, p) in points.iter().enumerate() {
+        let tm = t[i].rem_euclid(length);
+        let raw = tm / h;
+        let seg = (raw.floor() as usize).min(m - 1);
+        let u = raw - seg as f64;
+        let b = bspline_basis(u);
+        let cols = [
+            ((seg as isize - 1).rem_euclid(m as isize)) as usize,
+            seg,
+            (seg + 1) % m,
+            (seg + 2) % m,
+        ];
+
+        for a in 0..4 {
+            btx[cols[a]] += b[a] * p.x;
+            bty[cols[a]] += b[a] * p.y;
+            for bb in 0..4 {
+                btb[cols[a]][cols[bb]] += b[a] * b[bb];
+            }
+        }
+    }
+
+    // Periodic roughness penalty: (Dc)_i = c[i-1] - 2c[i] + c[i+1], wrapped mod m.
+    for i in 0..m {
+        let idxs = [(i + m - 1) % m, i, (i + 1) % m];
+        let coeffs = [1.0, -2.0, 1.0];
+        for a in 0..3 {
+            for b in 0..3 {
+                btb[idxs[a]][idxs[b]] += lambda * coeffs[a] * coeffs[b];
+            }
+        }
+    }
+
+    let cx = gauss_solve(btb.clone(), btx);
+    let cy = gauss_solve(btb, bty);
+
+    PeriodicBSpline { cx, cy, m, h, length }
+}
+
+
+fn build_arc_length_table(spline: &PeriodicBSpline, steps_per_interval: usize) -> Vec<(f64, f64)> {
+    let total_steps = spline.m * steps_per_interval;
+    let width = spline.length / total_steps as f64;
+    let mut table: Vec<(f64, f64)> = Vec::with_capacity(total_steps + 1);
+    table.push((0.0, 0.0));
 
     let mut cumulative_s: f64 = 0.0;
+    for i in 0..total_steps {
+        let t_a = i as f64 * width;
+        let t_b = t_a + width;
+        let t_m = (t_a + t_b) / 2.0;
 
-    for seg in segments {
-        let width = seg.h / steps_per_segment as f64;
-        for i in 0..steps_per_segment {
-            let t_a = seg.t0 + i as f64 * width;
-            let t_b = t_a + width;
-            let t_m = (t_a + t_b) / 2.0;
-            let (da_x, da_y) = eval_spline_deriv(segments, t_a);
-            let (db_x, db_y) = eval_spline_deriv(segments, t_b);
-            let (dm_x, dm_y) = eval_spline_deriv(segments, t_m);
+        let (da_x, da_y) = spline.eval_deriv(t_a);
+        let (db_x, db_y) = spline.eval_deriv(t_b);
+        let (dm_x, dm_y) = spline.eval_deriv(t_m);
 
-            let speed_a = f64::hypot(da_x, da_y);
-            let speed_b = f64::hypot(db_x, db_y);
-            let speed_m = f64::hypot(dm_x, dm_y);
+        let speed_a = f64::hypot(da_x, da_y);
+        let speed_b = f64::hypot(db_x, db_y);
+        let speed_m = f64::hypot(dm_x, dm_y);
 
-            let arc = (t_b - t_a) / 6.0 * (speed_a + 4.0 * speed_m + speed_b);
-            cumulative_s += arc;
-            table.push((t_b, cumulative_s));
-        }
+        let arc = width / 6.0 * (speed_a + 4.0 * speed_m + speed_b);
+        cumulative_s += arc;
+        table.push((t_b, cumulative_s));
     }
 
     table
 }
 
 
-pub fn eval_spline_curvature(segments: &[SplineSegment], t: f64) -> f64 {
-    let i = segments.partition_point(|seg| seg.t0 <= t).saturating_sub(1);
-    let seg = &segments[i];
-    let s = t - segments[i].t0;
-
-    let f_x = seg.bx + 2.0 * seg.cx * s + 3.0 * seg.dx * s.powi(2);
-    let f_y = seg.by + 2.0 * seg.cy * s + 3.0 * seg.dy * s.powi(2);
-    let d_x = 2.0 * seg.cx + 6.0 * seg.dx * s;
-    let d_y = 2.0 * seg.cy + 6.0 * seg.dy * s;
-    let cur = (f_x * d_y - f_y * d_x) / (f_x.powi(2) + f_y.powi(2)).powf(1.5);
-
-    cur
-}
-
-pub fn resample(segments: &[SplineSegment], ds: f64) -> (Vec<Point>, Vec<f64>) {
-    let table = build_arc_length_table(segments, 20);
+pub fn resample(spline: &PeriodicBSpline, ds: f64) -> (Vec<Point>, Vec<f64>) {
+    let table = build_arc_length_table(spline, 20);
     let total_arc_length = table.last().unwrap().1;
     let n_output = (total_arc_length / ds).floor() as usize;
 
-    let mut coordinates: Vec<Point > = Vec::new();
+    let mut coordinates: Vec<Point> = Vec::new();
     let mut curvatures: Vec<f64> = Vec::new();
 
     for i in 0..n_output {
@@ -249,41 +277,25 @@ pub fn resample(segments: &[SplineSegment], ds: f64) -> (Vec<Point>, Vec<f64>) {
         let (t_hi, s_hi) = table[i_table + 1];
         let t_star = t_lo + (s_i - s_lo) / (s_hi - s_lo) * (t_hi - t_lo);
 
-        coordinates.push(eval_spline(segments, t_star));
-        curvatures.push(eval_spline_curvature(segments, t_star));
+        let (x, y) = spline.eval(t_star);
+        coordinates.push(Point { x, y });
+        curvatures.push(spline.curvature(t_star));
     }
 
     (coordinates, curvatures)
 }
 
 
-pub fn export_curvature_csv(raw: &[f64], smoothed: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
+pub fn export_curvature_csv(curvature: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
-    writeln!(writer, "Distance,RawCurvature,SmoothedCurvature")?;
+    writeln!(writer, "Distance,Curvature")?;
 
-    for i in 0..raw.len() {
+    for (i, k) in curvature.iter().enumerate() {
         let distance = i as f64 * ds;
-        writeln!(writer, "{},{},{}", distance, raw[i], smoothed[i])?;
+        writeln!(writer, "{},{}", distance, k)?;
     }
 
     Ok(())
-}
-
-
-pub fn smooth_curvature(curvature: &[f64], window: usize) -> Vec<f64> {
-    let half: usize = window / 2;
-    let n = curvature.len();
-    let mut res = vec![0.0; n];
-
-    for i in 0..n {
-        let mut sum: f64 = 0.0;
-        for j in 0..window {
-            sum += curvature[(i + j + n - half) % n];
-        }
-        res[i] = sum / window as f64;
-    }
-
-    res
 }

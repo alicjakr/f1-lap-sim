@@ -1,19 +1,21 @@
 use std::path::Path;
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
-use crate::track::{build_spline, chord_length_params, export_curvature_csv, load_track_geometry, resample, smooth_curvature, Point};
+use crate::track::{export_curvature_csv, fit_periodic_bspline, load_track_geometry, resample, total_length};
 
 mod track;
 mod solver;
 
 fn main() {
-    let track_geometry: Vec<Point> = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
-    let t = chord_length_params(&track_geometry);
-    let segments = build_spline(&track_geometry, &t);
-    let (resampled, raw_curvature) = resample(&segments, 1.0);
-    let curvature = smooth_curvature(&raw_curvature, 35);
-    export_curvature_csv(&raw_curvature, &curvature, 1.0, Path::new("data/curvature_debug.csv")).unwrap();
+    let (track_geometry, t) = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
+    let length = total_length(&track_geometry, &t);
+    // One control point roughly every 25m: far fewer than the raw GPS point count, so the
+    // fitted curve is structurally incapable of reproducing point-to-point GPS noise.
+    let control_points = (length / 12.0).round() as usize;
+    let smoother = fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
+    let (resampled, curvature) = resample(&smoother, 1.0);
+    export_curvature_csv(&curvature, 1.0, Path::new("data/curvature_debug.csv")).unwrap();
 
-    println!("Input point count: {}, resampled point count: {}, total track length: {}", track_geometry.len(), resampled.len(), resampled.len() as f64 * 1.0);
+    println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
     let parameters = CarParams {
