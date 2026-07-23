@@ -90,3 +90,16 @@ Each stage should be tackled as its own sequence of detailed prompts. Do not jum
 - Track curvature representation: conceptually scoped already (see Stage 1).
 - FastF1 has already been identified as the data source for validation.
 - A related prior project, `Formula-One-Regulations-Analysis` (Python/Dash, on GitHub), already does F1 telemetry analysis and could be a source of reusable FastF1-handling code/snippets for the export step, though it is a separate codebase and not part of this repo.
+
+---
+
+## Future direction: universal model (post-v1)
+
+Not current scope — v1 is still single-track (Singapore), single-driver (Hamilton 2018 Q), and the stages above take priority. This section exists so the idea isn't lost: once v1 is validated and Stage 4's sensitivity analysis is done, a natural next question is whether the model generalizes beyond the one lap it's been tuned against, rather than only reproducing it. Surfaced during a v1 accuracy review (found while checking why the model matched Hamilton's lap as well as it did — `v_top` turned out to be read directly from his telemetry rather than derived from the car's own power/drag balance; fixed, see below). Roughly in priority order:
+
+1. **Generalization test.** Run the current fixed parameter set (`μ_lat`, `μ_lon`, `c_l`, `c_d`, `p_engine`, `a_brake`) against a second, independent track/driver lap, unretuned. This is the cheapest way to find out whether the current ~4% error reflects real model accuracy or a Singapore-specific fit — do this before investing in anything else below.
+2. **Use `data/track_boundaries.csv`.** Already exported by `python_scripts/export_boundaries.py` but never read by the Rust simulator. Needed if the goal becomes finding an optimal racing line per track rather than replaying whatever line the source telemetry happened to drive.
+3. **Curvature smoothing is numerically backwards.** Currently: interpolate exactly through noisy GPS points, differentiate twice (noise-amplifying), then smooth the result after the fact. A smoothing (not interpolating) spline fit to the raw X/Y — before differentiating — would matter more once feeding in arbitrary tracks of varying GPS quality, not just one hand-tuned circuit.
+4. **Parameters are curve-fit, not derived.** `μ_lat=1.63` and the ad hoc brake/traction floor constants (`a_brake × 0.3`, `μ_lon·g_eff × 0.1`) were tuned to match this one lap. Fine for a single-track validation; a universal model needs these to mean something physically, not just happen to work for Singapore.
+5. **2D-only, no elevation/banking.** Irrelevant for flat Singapore; will matter for tracks with significant elevation change (Spa, Silverstone, etc.).
+6. **Two-pass solver is bang-bang, not optimal.** The friction ellipse couples lateral/longitudinal grip *magnitude* at each point, but both passes always brake/accelerate at the maximum the ellipse allows — there's no modeling of a driver choosing to brake below the limit to carry more speed into an apex (real trail braking). Closing this gap means replacing the two-pass sweep with a minimum-time optimal control formulation (direct collocation / NLP over the whole lap). Biggest lift on this list — do it last, once track/line/parameters are already track-independent, so there's something worth optimizing precisely.
