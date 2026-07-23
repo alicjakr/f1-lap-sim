@@ -107,7 +107,7 @@ At each point, the lateral load already carried (`a_lat = v²·|κ|`) reduces th
 a_lon = μ_lon · g_eff · √(1 − (a_lat / μ_lat·g_eff)²)
 ```
 
-This affects both passes: forward pass (acceleration out of corners) and backward pass (braking into corners). `a_brake` is retained as a soft floor scaled by `(1 − ratio)`, representing that real tire friction ellipses are not perfectly sharp — some longitudinal capacity remains even at high lateral load.
+This affects both passes: forward pass (acceleration out of corners) and backward pass (braking into corners). `a_brake` is retained as a flat soft floor (`a_brake × 0.3`), representing that real tire friction ellipses are not perfectly sharp — some longitudinal capacity remains even at high lateral load, regardless of how saturated the lateral grip is.
 
 ## Results
 
@@ -130,3 +130,49 @@ The remaining 12% error therefore has two components:
 2. **Algorithmic gap** — the two-pass cannot recover the time a real driver gains by optimally blending lat/lon grip across the full corner arc; this requires an optimal control formulation (minimum-time problem) rather than a greedy two-pass sweep
 
 The algorithmic gap is fundamental to the two-pass approach and cannot be closed without replacing the solver.
+
+---
+
+# V3 — Recalibration and Periodic Boundary Fix
+
+## What changed: geometry and parameter fixes
+
+Three fixes were made on top of V2:
+
+1. **Removed the interpolating B-spline geometry smoother** that had briefly been introduced to address the curvature-noise problem described above. As already noted in that section, an *interpolating* spline amplifies rather than suppresses noise when input points are perturbed — this was confirmed in practice and reverted. Curvature smoothing remains the simpler post-hoc moving average.
+2. **Restored the correct track length.** A bug in the arc-length/resampling path had been producing an incorrect total track length; fixing it brings the resampled length to 5057 m, close to FastF1's own reported lap distance (5026 m, ~0.6% higher — plausibly a geometric-path-length vs. telemetry-distance discrepancy).
+3. **Recalibrated car parameters**, including reducing `p_engine` from 1200 to 921 W/kg — the latter corresponds to a real hybrid power unit's specific power (~735 kW combined ICE+MGU-K over ~800 kg race weight), rather than an arbitrary round number.
+
+## Results after recalibration
+
+| Model | Lap time | Delta | Error |
+|---|---|---|---|
+| Reference (HAM 2018 Q) | 1:36.015 | — | — |
+| V2 (friction ellipse) | 1:47.671 | +11.7 s | +12% |
+| V3 recalibrated | 1:39.476 | +3.46 s | +3.6% |
+
+The corner-by-corner shape now tracks the reference closely across nearly the entire lap, not just the aggregate lap time — confirmed by plotting the simulated and reference speed traces against distance rather than relying on the total-time figure alone.
+
+## Periodic boundary fix (start/finish line)
+
+Plotting the recalibrated trace revealed one clear artifact: the first ~300 m sat flat at `v_top` (322 km/h) while the reference lap is still accelerating out of the final corner before the line, from ~270 km/h.
+
+**Root cause:** the track model (`track.rs`) is periodic — the spline and curvature array represent a closed loop — but the velocity solver (`solver.rs`) is not. `backward_pass` only ever sets `v[i]` from `v[i+1]`, and `forward_pass` only ever sets `v[i]` from `v[i-1]`; neither touches the boundary between the last sample and the first. So index 0 had no upstream constraint from the corner that actually precedes it on the real track (which is off the end of the array), and was left at the bare corner-speed limit computed from local curvature alone. No amount of outer-loop iteration could fix this, since the connection between the last and first sample simply doesn't exist in an open sweep — it isn't a convergence problem, it's a missing constraint.
+
+**Fix:** `main.rs` now concatenates the curvature array with itself three times (`curvature.iter().cycle().take(n * laps)`) and runs the existing, unmodified two-pass solver over the padded array. By the third copy, the artificial cold-start transient from the very first sample has been overwritten — pass after pass — by the real upstream braking constraint carried over from the previous copy. Only the final lap (`v[(laps-1)*n .. laps*n]`) is kept for lap-time integration and CSV export. A periodicity check (max difference between the final lap and the one before it) printed exactly `0`, confirming the solution has converged to a genuinely periodic steady state and that 3 laps was more than sufficient padding (a single extra lap was already enough in principle, given the artifact only extended ~260 m — consistent with the deceleration distance from `v_top` into the first braking zone).
+
+## Results after the boundary fix
+
+| Model | Lap time | Delta | Error |
+|---|---|---|---|
+| Reference (HAM 2018 Q) | 1:36.015 | — | — |
+| V3 recalibrated (open boundary) | 1:39.476 | +3.46 s | +3.6% |
+| V3 final (periodic boundary) | 1:40.060 | +4.05 s | +4.2% |
+
+![V3 periodic boundary fix](comparison_v3_periodic.png)
+
+## Discussion
+
+The periodic fix makes the lap time *worse* (+0.58 s) but more honest: the previous 3.6% figure was partly inflated by a solver artifact that let the car begin the lap already at top speed, for free, rather than carrying speed over realistically from the corner before the line. This is the correct trade — a result that looks better only because of a boundary bug is not a result worth keeping.
+
+At 4.2% error, this remains the best-validated model so far, and the remaining gap is consistent with what V1 and V2 already identified: curvature noise from the moving-average smoother, and the algorithmic gap between the two-pass sweep and a real driver's continuous blending of lateral and longitudinal grip through the friction ellipse (see V2 discussion above). Both remain open items rather than newly discovered issues.
