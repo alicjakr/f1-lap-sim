@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 const G: f64 = 9.81;
@@ -9,43 +9,29 @@ pub struct CarParams {
     pub mu_lat: f64,     // lateral friction coefficient
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
     pub a_brake: f64,    // peak braking deceleration (m/s²)
-    pub v_top: f64,      // hard speed cap (m/s)
     pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
     pub c_d: f64,        // drag coefficient per unit mass (m⁻¹)
     pub p_engine: f64,   // engine power
 }
 
 
-pub fn load_top_speed(path: &Path) -> Result<f64, Box<dyn Error>> {
-    let reader = BufReader::new(File::open(path)?);
-    let mut top_speed: f64 = 0.0;
-
-    let mut lines = reader.lines();
-    lines.next();
-
-    for line in lines {
-        let line = line?;
-        let mut cols = line.split(',');
-        cols.next();
-        let speed: f64 = cols.next().ok_or("missing speed")?.parse()?;
-        if speed > top_speed {
-            top_speed = speed;
-        }
-    }
-
-    Ok(top_speed / 3.6)
+// Top speed the car can sustain in a straight line, from its own power/drag balance
+// (a_available = P/v - c_d*v² = 0), rather than read off a real lap's telemetry.
+pub fn top_speed(params: &CarParams) -> f64 {
+    (params.p_engine / params.c_d).cbrt()
 }
 
 
 pub fn corner_speed_limits(curvature: &[f64], params: &CarParams) -> Vec<f64> {
+    let v_top = top_speed(params);
     let mut limits: Vec<f64> = vec![0.0; curvature.len()];
 
     for i in 0..curvature.len() {
         let denom: f64 = curvature[i].abs() - params.mu_lat * params.c_l;
         if denom <= 0.0 {
-            limits[i] = params.v_top;
+            limits[i] = v_top;
         } else {
-            limits[i] = (params.mu_lat * G / denom).sqrt().min(params.v_top);
+            limits[i] = (params.mu_lat * G / denom).sqrt().min(v_top);
         }
     }
 
