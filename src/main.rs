@@ -26,13 +26,45 @@ fn main() {
     println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
+    // mu_lat/mu_lon/p_engine/a_brake are tire and powertrain properties, not wing-angle
+    // choices, so they stay fixed across tracks. mass 734 kg (2018 min car+driver weight,
+    // near-empty quali fuel); mu_lat/mu_lon from published tire-only (aero-excluded)
+    // friction estimates (1.4-1.8 / 1.5-1.6); p_engine = (625 kW ICE + 120 kW MGU-K peak)
+    // / 734 kg, no ERS energy budget modeled (known idealization: real cars can't sustain
+    // this continuously, only ~33s/lap of MGU-K boost); a_brake within published ~5g peak
+    // braking.
+    //
+    // c_l/c_d are wing-level choices real teams change per circuit, so they're derived
+    // per track below rather than as one universal figure. Published Cl/Cd for two known
+    // reference points (Monaco, max downforce: 2.89; Monza, min downforce: 2.98) show the
+    // L/D ratio stays roughly constant (~2.9) across downforce levels -- what actually
+    // changes is the absolute Cd. Three tiers, Cd scaled from Monaco/Monza's own historical
+    // Cd (1.08 / 0.68) with Cl = Cd*2.9, A = 1.4 m², rho = 1.225 kg/m^3, c_x = 0.5*rho*Cx*A/m.
+    const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
+    const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);  // Cd=0.85, Cl=2.47
+    const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
+
+    // 2018 calendar (21 rounds), tiered by circuit character: tight/technical -> high,
+    // long-straight power circuits -> low, everything else -> medium. Monaco/Hungaroring/
+    // Singapore/Monza/Spa/Baku are well-sourced as tier extremes; most "medium" placements
+    // are standard paddock classification rather than individually re-derived. Mexico is a
+    // special case folded into "medium" as an approximation: real air density at 2240m
+    // altitude is ~77% of sea level, which this model doesn't account for separately from
+    // the wing-level choice captured here.
+    let (c_l, c_d) = match track.as_str() {
+        "monaco" | "hungaroring" | "singapore" | "catalunya" => HIGH_DOWNFORCE,
+        "baku" | "montreal" | "redbullring" | "spa" | "monza" => LOW_DOWNFORCE,
+        "melbourne" | "bahrain" | "shanghai" | "paulricard" | "silverstone" | "hockenheim"
+        | "sochi" | "suzuka" | "cota" | "mexico" | "interlagos" | "yasmarina" => MED_DOWNFORCE,
+        _ => MED_DOWNFORCE, // fallback for unrecognized slugs
+    };
     let parameters = CarParams {
-        mu_lat: 1.63,
-        mu_lon: 1.5,
-        a_brake: 40.0,
-        c_l: 0.008,
-        c_d: 0.0015,
-        p_engine: 921.0,
+        mu_lat: 1.6,
+        mu_lon: 1.55,
+        a_brake: 45.0,
+        c_l,
+        c_d,
+        p_engine: 1015.0,
     };
     // backward_pass/forward_pass are open (linear) sweeps: they never connect index n-1
     // back to index 0, even though the track itself is a closed loop. Solve over several
