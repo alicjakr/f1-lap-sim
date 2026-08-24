@@ -1,3 +1,4 @@
+use std::env;
 use std::path::Path;
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
 use crate::track::{export_curvature_csv, fit_periodic_bspline, load_track_geometry, resample, total_length};
@@ -6,14 +7,21 @@ mod track;
 mod solver;
 
 fn main() {
-    let (track_geometry, t) = load_track_geometry(Path::new("data/track_geometry.csv")).unwrap();
+    // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
+    // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
+    let track = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
+    let geometry_path = format!("data/{}_track_geometry.csv", track);
+    let curvature_debug_path = format!("data/{}_curvature_debug.csv", track);
+    let simulated_lap_path = format!("data/{}_simulated_lap.csv", track);
+
+    let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
     let length = total_length(&track_geometry, &t);
     // One control point roughly every 25m: far fewer than the raw GPS point count, so the
     // fitted curve is structurally incapable of reproducing point-to-point GPS noise.
     let control_points = (length / 12.0).round() as usize;
     let smoother = fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
     let (resampled, curvature) = resample(&smoother, 1.0);
-    export_curvature_csv(&curvature, 1.0, Path::new("data/curvature_debug.csv")).unwrap();
+    export_curvature_csv(&curvature, 1.0, Path::new(&curvature_debug_path)).unwrap();
 
     println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
@@ -56,5 +64,5 @@ fn main() {
     let seconds = lap_time % 60.0;
     println!("Lap time: {}:{:06.3}", minutes, seconds);
 
-    export_velocity_csv(&v_final, 1.0, Path::new("data/simulated_lap.csv")).unwrap();
+    export_velocity_csv(&v_final, 1.0, Path::new(&simulated_lap_path)).unwrap();
 }
