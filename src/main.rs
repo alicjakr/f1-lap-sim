@@ -1,18 +1,26 @@
 use std::env;
 use std::path::Path;
+use crate::optimal::solve_min_time;
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
 use crate::track::{export_curvature_csv, fit_periodic_bspline, load_track_geometry, resample, total_length};
 
 mod track;
 mod solver;
+mod optimal;
 
 fn main() {
     // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
     let track = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
+    // "twopass" (default) runs the existing greedy sweep; "optimal" runs the minimum-time
+    // collocation solver in optimal.rs instead, on a coarser grid (see solve_min_time).
+    let mode = env::args().nth(2).unwrap_or_else(|| "twopass".to_string());
+    // Only used in "optimal" mode: target collocation-point spacing in meters.
+    let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(25.0);
     let geometry_path = format!("data/{}_track_geometry.csv", track);
     let curvature_debug_path = format!("data/{}_curvature_debug.csv", track);
     let simulated_lap_path = format!("data/{}_simulated_lap.csv", track);
+    let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track);
 
     let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
     let length = total_length(&track_geometry, &t);
@@ -66,6 +74,17 @@ fn main() {
         c_d,
         p_engine: 1015.0,
     };
+    if mode == "optimal" {
+        let (v_final, obj_lap_time, ds_coarse) = solve_min_time(&curvature, 1.0, &parameters, spacing);
+        let minutes = (obj_lap_time / 60.0) as u32;
+        let seconds = obj_lap_time % 60.0;
+        println!("Lap time (optimal, objective value): {}:{:06.3}", minutes, seconds);
+        let lap_time_check = lap_time(&v_final, ds_coarse);
+        println!("Lap time (recomputed from returned velocity profile): {:.3}s", lap_time_check);
+        export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_optimal_path)).unwrap();
+        return;
+    }
+
     // backward_pass/forward_pass are open (linear) sweeps: they never connect index n-1
     // back to index 0, even though the track itself is a closed loop. Solve over several
     // concatenated laps instead, so the artificial "cold start" at the very first sample
