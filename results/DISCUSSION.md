@@ -218,3 +218,104 @@ The likely explanation: `μ_lat = 1.63`, `c_l = 0.008`, and the rest were tuned 
 Two things support reading this as a parameter-fit problem rather than a remaining data or geometry bug: Singapore's error is a *consistent* −7.8 km/h bias (the signature of a systematic model/parameter mismatch) rather than the large, localized swings that characterized the three Suzuka bugs above; and Suzuka's near-zero mean bias with comparable RMS suggests the residual there is closer to unstructured noise than to a systematic gap.
 
 Net conclusion: the model generalizes structurally (both tracks now show plausible, explicable error, not the "unrelated laps" failure mode from before), but the specific parameter values do not — they were a Singapore-specific fit, not physically derived constants. Re-deriving `μ_lat`/`μ_lon`/`c_l`/`c_d` from something other than "whatever matches one lap" is the natural next step, not further geometry work.
+
+---
+
+---
+
+# V5 — Physically-Derived Parameters and a Minimum-Time Optimal-Control Solver
+
+## Re-deriving the parameters from 2018 regulations and public aero data
+
+Every parameter (`μ_lat`, `μ_lon`, `c_l`, `c_d`, `p_engine`) was, up to V4, a curve-fit to Hamilton's Singapore lap — useful for a single-track validation, but not something that means anything physically, and V4 already showed the fit was absorbing Singapore-specific geometry bugs rather than reflecting the car. Replaced with values derived from public 2018 figures instead of any lap time:
+
+- **Mass**: 734 kg, the 2018 minimum combined car+driver weight, appropriate for a near-empty-fuel qualifying lap.
+- **`μ_lat` = 1.6, `μ_lon` = 1.55**: published tire-only (aero-excluded) friction estimates for F1 slicks (~1.4–1.8 lateral, ~1.5–1.6 longitudinal). Notably close to the old curve-fit values (1.63 / 1.5) — a reasonable cross-check, not a coincidence to lean on.
+- **`p_engine` = 1015 W/kg**: (625 kW ICE + 120 kW MGU-K peak) / 734 kg. This is a known idealization — the MGU-K's energy store limits deployment to ~33 s/lap, not continuously, and this model has no energy-budget state to represent that (see "Why not model the energy budget now" below).
+- **`c_l`/`c_d`**: unlike the other parameters, these are real per-circuit choices — teams change wing level by track, so a single "universal" figure can't represent both a high-downforce circuit and a low-downforce one correctly. Derived from two historical reference points (Monaco, max downforce, Cd≈1.08, Cl/Cd≈2.89; Monza, min downforce, Cd≈0.68, Cl/Cd≈2.98) which show the L/D ratio staying roughly constant (~2.9) across downforce levels while the absolute Cd scales with wing level. Three tiers (high/medium/low), applied to all 21 tracks on the 2018 calendar by circuit character:
+
+  | Tier | Cd / Cl | c_d / c_l (m⁻¹) | Tracks |
+  |---|---|---|---|
+  | High | 1.05 / 3.05 | 0.0012 / 0.0036 | Monaco, Hungaroring, Singapore, Catalunya |
+  | Medium | 0.85 / 2.47 | 0.0010 / 0.0029 | Melbourne, Bahrain, Shanghai, Paul Ricard, Silverstone, Hockenheim, Sochi, Suzuka, COTA, Mexico*, Interlagos, Yas Marina |
+  | Low | 0.70 / 2.03 | 0.00082 / 0.0024 | Baku, Montreal, Red Bull Ring, Spa, Monza |
+
+  (*Mexico is folded into "medium" as an approximation — its real air density at 2240 m altitude is ~77% of sea level, an effect this model doesn't separate from the wing-level choice.)
+
+`main.rs` also gained multi-track support alongside this: `export_track.py` and `main.rs` now take a track slug and read/write `data/<slug>_*.csv`, so multiple tracks' data can coexist rather than each run overwriting the last (`scripts/setup_ipopt.sh` and `.cargo/config.toml` were added later in this stage for an unrelated reason — see below).
+
+## First result: both test tracks get worse, and by a similar amount
+
+| Track | Lap time | Reference | Error |
+|---|---|---|---|
+| Singapore | 1:58.163 | 1:36.015 | +23.1% |
+| Suzuka | 1:45.646 | 1:28.702 | +19.1% |
+
+Both plots showed the same shape of error: correct timing/location of every peak and valley, but the simulated trace overshoots every peak (top speed 344–353 km/h vs. real 317–322) and undershoots every valley (tightest corners 50–70 km/h vs. real 90–150). Same root cause twice: `c_d` too low for real drag, `c_l` too low for real downforce — because the initial pass used one universal "calendar-average" Cl/Cd for every track, and Singapore and Suzuka are both above-average-downforce circuits. Splitting into the three tiers above (Monza got its own low-downforce entry too, once real Monza data was pulled as a third test point) recovered most of the gap:
+
+| Track | Tier | Lap time | Reference | Error |
+|---|---|---|---|---|
+| Singapore | high | 1:55.344 | 1:36.015 | +20.1% |
+| Suzuka | medium | 1:43.587 | 1:28.702 | +16.8% |
+| Monza | low | 1:27.367 | 1:21.321 | +7.4% |
+
+Error still scales with how corner-heavy the track is (Monza, mostly flat-out, is least sensitive to any remaining aero mismatch), which is expected and not itself a bug — see the braking-floor discovery below for where much of the remaining gap actually was.
+
+## A minimum-time optimal-control solver, replacing the two-pass sweep
+
+The two-pass sweep (`backward_pass`/`forward_pass`) is bang-bang: at every point it brakes or accelerates at the absolute edge of the friction ellipse, with no notion of a driver choosing to hold back briefly to carry more speed through a corner (real trail braking). Closing this gap — flagged as the single biggest remaining lift back in the original roadmap — means replacing the greedy sweep with an actual minimum-time optimal control problem solved over the whole lap at once, via [Ipopt](https://coin-or.github.io/Ipopt/) through the `ipopt-rs` crate (`src/optimal.rs`).
+
+**Formulation.** State `x(s) = v(s)²` (avoids a `1/v` singularity and makes the dynamics affine in the control), control `u(s) = a_lon(s)`. The racing line is still fixed, so lateral acceleration is pinned by whatever `v` the solver picks (`a_lat = x·κ`), not a free choice — the only real decision is how hard to brake or accelerate. Trapezoidal collocation over `n` points around the closed (periodic) lap:
+
+```
+x[i+1] - x[i] - (u[i] + u[i+1])·ds = 0                          (dynamics defect)
+(x·κ)² / (μ_lat·g_eff)² + u² / (μ_lon·g_eff)² ≤ 1               (friction ellipse)
+u ≤ p_engine/√x - c_d·x                                         (power ceiling)
+minimize Σ ds/v[i]                                              (lap time)
+```
+
+No separate braking-capacity constraint — see below for why.
+
+**Getting `ipopt-rs` building at all.** `ipopt-sys`'s vendored CMake build searches for headers under `coin/`, a layout COIN-OR replaced with `coin-or/` (which is what Homebrew ships) some time after this binding was last updated for a new Ipopt version — no env var exists to override the search path directly. Fixed with a small, reproducible local shim rather than patching Homebrew's own directory: `scripts/setup_ipopt.sh` generates a `coin` symlink and a `.pc` file pointing pkg-config at it, and `.cargo/config.toml` points `PKG_CONFIG_PATH` at it using a repo-relative path — works for any dev via `brew install ipopt && ./scripts/setup_ipopt.sh`.
+
+**L-BFGS doesn't scale to full resolution.** The first working version used Ipopt's limited-memory (L-BFGS) Hessian approximation rather than hand-derived second derivatives — a reasonable corner-cut, but one with a real ceiling. Bisecting resolution against problem size:
+
+| Grid spacing | Variables | Result |
+|---|---|---|
+| 25 m | 404 | converged, 131 iterations |
+| 15 m | 672 | converged, 700 iterations |
+| 10 m | 1008 | converged, 1713 iterations |
+| 7 m | 1440 | **failed** — hit 3000-iteration cap, `inf_pr` oscillating rather than shrinking |
+| 1 m (full) | 10078 | **failed** — same oscillating-not-converging pattern |
+
+Iteration count grew much faster than linearly with problem size before failing outright — the known signature of L-BFGS's fixed-size memory window capturing proportionally less curvature information as dimension grows. Fixed by deriving the analytic Hessian instead (the dynamics defect is linear and contributes nothing; only the objective and the ellipse/power constraints need second derivatives — worked out in the `optimal.rs` module comment). Full 1 m resolution then converged in 43 iterations, 0.7 s.
+
+## The old braking floor was a two-pass crutch, not real physics
+
+The first full-resolution comparison came out backwards: optimal control was *slower* than the two-pass (116.359 s vs. 115.344 s on Singapore), which shouldn't be possible if the two-pass's bang-bang solution is a feasible point inside the optimal solver's constraint set. It wasn't. `backward_pass` had carried a floor since V2 —
+
+```rust
+let a_brake_eff = (a_lon.max(params.a_brake * 0.3) + params.c_d * v[i+1].powi(2)).max(0.0);
+```
+
+— guaranteeing at least `a_brake × 0.3` (13.5 m/s²) of braking capacity even when the pure ellipse implies near zero, which happens exactly at high lateral load, i.e. exactly where trail braking matters. The two-pass sweep had been quietly exceeding the friction ellipse in corner-entry zones the whole time; V2's justification (real friction ellipses aren't perfectly sharp) doesn't hold up once there's an algorithm capable of blending honestly instead of needing a patch. Dropped from both solvers — `CarParams` no longer has an `a_brake` field at all — for one consistent, honestly-enforced ellipse everywhere.
+
+## Results: two-pass vs. optimal control, same physics, same resolution
+
+| Track | Reference | Two-pass | Optimal | Two-pass error | Optimal error | Optimal vs. two-pass |
+|---|---|---|---|---|---|---|
+| Singapore | 1:36.015 | 2:06.833 | 1:56.359 | +32.1% | +21.2% | −10.47 s (−8.3%) |
+| Suzuka | 1:28.702 | 1:51.396 | 1:44.270 | +25.6% | +17.6% | −7.13 s (−6.4%) |
+| Monza | 1:21.321 | 1:31.914 | 1:28.032 | +13.0% | +8.3% | −4.22 s (−4.2%) |
+
+The optimal-control gain scales with how corner-heavy the track is — Singapore (most corners, most lateral-load time) gains the most, Monza (mostly flat-out) the least — consistent with the mechanism: on Singapore, optimal control is faster at 98.5% of points by a modest, broadly-distributed +7.1 km/h on average (not a few dramatic corners), which is why the two traces look nearly identical on a speed-vs-distance plot despite the 8.3% aggregate gap. The margin the old floor used to paper over was spread almost everywhere the car was near the lateral limit, and that's the same margin real blending recovers.
+
+![Singapore: reference vs. two-pass vs. optimal control](comparison_v5_singapore.png)
+
+All three traces track the same peaks and valleys at the same distances — the two-pass and optimal-control lines are visually almost indistinguishable from each other, both following the reference shape closely. That similarity is the point: the 8.3% gap between two-pass and optimal isn't visible as a shape difference because it isn't one, it's the small, broadly-distributed per-point margin described above, not a difference in *where* the car brakes or accelerates.
+
+Error-vs-reference is still large (13–32% for two-pass, 8–21% for optimal) now that the floor is gone — expected, not a new problem. Two known idealizations account for most of it: the sharp (rather than rounded) friction ellipse, and `p_engine` as a continuously-available peak figure with no ERS energy budget, both already flagged as open items rather than newly discovered here.
+
+## Why not model the energy budget now
+
+Raised and deliberately deferred: the MGU-K's 4 MJ/lap budget isn't a pointwise constraint like everything else in this model — how much boost is available at a given point depends on how much has already been spent everywhere earlier in the lap, and *where* to spend a fixed budget for maximum benefit is itself an optimization problem, not a physics inequality. It's the same class of problem as the optimal-control work just done, not a separate one: modeling it properly means adding an energy state to the collocation formulation above (a running "MJ spent so far" variable threaded through the solve) rather than a standalone heuristic, which would just be trading one hand-tuned rule for a smaller one. Natural next extension of `optimal.rs`, not a new solver.
