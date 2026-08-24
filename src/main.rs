@@ -34,13 +34,17 @@ fn main() {
     println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
-    // mu_lat/mu_lon/p_engine/a_brake are tire and powertrain properties, not wing-angle
-    // choices, so they stay fixed across tracks. mass 734 kg (2018 min car+driver weight,
-    // near-empty quali fuel); mu_lat/mu_lon from published tire-only (aero-excluded)
-    // friction estimates (1.4-1.8 / 1.5-1.6); p_engine = (625 kW ICE + 120 kW MGU-K peak)
-    // / 734 kg, no ERS energy budget modeled (known idealization: real cars can't sustain
-    // this continuously, only ~33s/lap of MGU-K boost); a_brake within published ~5g peak
-    // braking.
+    // mu_lat/mu_lon/p_engine are tire and powertrain properties, not wing-angle choices, so
+    // they stay fixed across tracks. mass 734 kg (2018 min car+driver weight, near-empty
+    // quali fuel); mu_lat/mu_lon from published tire-only (aero-excluded) friction estimates
+    // (1.4-1.8 / 1.5-1.6); p_engine = (625 kW ICE + 120 kW MGU-K peak) / 734 kg, no ERS
+    // energy budget modeled (known idealization: real cars can't sustain this continuously,
+    // only ~33s/lap of MGU-K boost). Braking capacity is derived purely from the friction
+    // ellipse (mu_lon*g_eff), not a separate flat floor -- an earlier a_brake*0.3 floor was
+    // dropped once the minimum-time solver (optimal.rs) showed it let the two-pass sweep
+    // brake harder than the pure ellipse allows, particularly at corner entry where lateral
+    // load is highest; it was a two-pass crutch, not real physics, so removed from both
+    // solvers rather than kept as an inconsistency between them.
     //
     // c_l/c_d are wing-level choices real teams change per circuit, so they're derived
     // per track below rather than as one universal figure. Published Cl/Cd for two known
@@ -69,7 +73,6 @@ fn main() {
     let parameters = CarParams {
         mu_lat: 1.6,
         mu_lon: 1.55,
-        a_brake: 45.0,
         c_l,
         c_d,
         p_engine: 1015.0,

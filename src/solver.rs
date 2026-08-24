@@ -8,7 +8,6 @@ const G: f64 = 9.81;
 pub struct CarParams {
     pub mu_lat: f64,     // lateral friction coefficient
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
-    pub a_brake: f64,    // peak braking deceleration (m/s²)
     pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
     pub c_d: f64,        // drag coefficient per unit mass (m⁻¹)
     pub p_engine: f64,   // engine power
@@ -46,7 +45,7 @@ pub fn backward_pass(curvature: &[f64], v_corner: &[f64], params: &CarParams, ds
         let a_lat = v[i].powi(2) * curvature[i].abs();
         let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
         let a_lon = params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt();
-        let a_brake_eff = (a_lon.max(params.a_brake * 0.3) + params.c_d * v[i+1].powi(2)).max(0.0);
+        let a_brake_eff = (a_lon + params.c_d * v[i+1].powi(2)).max(0.0);
         v[i] = v[i].min((v[i+1].powi(2) + 2.0 * a_brake_eff * ds).sqrt())
     }
 
