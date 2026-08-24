@@ -1,0 +1,6 @@
+# Points pkg-config at the local ipopt shim (see scripts/setup_ipopt.sh) instead of
+# Homebrew's ipopt.pc directly, working around ipopt-sys's outdated coin/ header
+# path expectation. "relative = true" resolves against the repo root, so this works
+# on any machine regardless of clone location or Homebrew's install prefix.
+[env]
+PKG_CONFIG_PATH = { value = ".ipopt-shim", relative = true, force = true }

@@ -37,3 +37,7 @@ target
 
 # Python virtual environment
 .venv/
+
+# Machine-specific ipopt-sys build shim (bakes in this machine's Homebrew prefix);
+# regenerate with scripts/setup_ipopt.sh
+/.ipopt-shim/
