@@ -1,8 +1,8 @@
 use std::env;
 use std::path::Path;
-use crate::optimal::solve_min_time;
+use crate::optimal::{solve_min_time, solve_racing_line};
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
-use crate::track::{export_curvature_csv, fit_periodic_bspline, load_track_geometry, resample, total_length};
+use crate::track::{export_curvature_csv, fit_periodic_bspline, load_boundaries, load_track_geometry, resample, total_length};
 
 mod track;
 mod solver;
@@ -13,14 +13,19 @@ fn main() {
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
     let track = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
     // "twopass" (default) runs the existing greedy sweep; "optimal" runs the minimum-time
-    // collocation solver in optimal.rs instead, on a coarser grid (see solve_min_time).
+    // collocation solver in optimal.rs instead, on a coarser grid (see solve_min_time);
+    // "racingline" runs that same solver with a free lateral offset bounded by track width
+    // (see solve_racing_line), requiring data/<slug>_track_boundaries.csv to already exist
+    // (python_scripts/export_osm_boundaries.py).
     let mode = env::args().nth(2).unwrap_or_else(|| "twopass".to_string());
-    // Only used in "optimal" mode: target collocation-point spacing in meters.
+    // Only used in "optimal"/"racingline" modes: target collocation-point spacing in meters.
     let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(25.0);
     let geometry_path = format!("data/{}_track_geometry.csv", track);
     let curvature_debug_path = format!("data/{}_curvature_debug.csv", track);
     let simulated_lap_path = format!("data/{}_simulated_lap.csv", track);
     let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track);
+    let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track);
+    let boundaries_path = format!("data/{}_track_boundaries.csv", track);
 
     let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
     let length = total_length(&track_geometry, &t);
@@ -85,6 +90,31 @@ fn main() {
         let lap_time_check = lap_time(&v_final, ds_coarse);
         println!("Lap time (recomputed from returned velocity profile): {:.3}s", lap_time_check);
         export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_optimal_path)).unwrap();
+        return;
+    }
+
+    if mode == "racingline" {
+        let (bound_s, n_left, n_right) = load_boundaries(Path::new(&boundaries_path)).unwrap();
+        let (v_final, n_profile, racing_line_time, ds_coarse) =
+            solve_racing_line(&curvature, 1.0, &parameters, spacing, &bound_s, &n_left, &n_right);
+        let minutes = (racing_line_time / 60.0) as u32;
+        let seconds = racing_line_time % 60.0;
+        println!("Lap time (racing line): {}:{:06.3}", minutes, seconds);
+
+        let mean_abs_n = n_profile.iter().map(|n| n.abs()).sum::<f64>() / n_profile.len() as f64;
+        let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
+        println!("Lateral offset used: mean |n| = {:.2} m, max |n| = {:.2} m", mean_abs_n, max_abs_n);
+
+        // n=0 is a feasible point of this same problem (it's exactly the fixed-line
+        // problem), so the racing line can never come out slower -- a useful built-in
+        // correctness check, not just a comparison.
+        let (_, fixed_line_time, _) = solve_min_time(&curvature, 1.0, &parameters, spacing);
+        println!(
+            "Fixed-line optimal lap time for comparison: {:.3}s (racing line should be <= this; delta = {:.3}s)",
+            fixed_line_time, racing_line_time - fixed_line_time
+        );
+
+        export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_racingline_path)).unwrap();
         return;
     }
 

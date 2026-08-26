@@ -286,6 +286,38 @@ pub fn resample(spline: &PeriodicBSpline, ds: f64) -> (Vec<Point>, Vec<f64>) {
 }
 
 
+// Reads python_scripts/export_osm_boundaries.py's output: s,x,y,n_left,n_right. The x,y
+// columns are dropped -- they're the same reference line already loaded via
+// load_track_geometry, so only the arc-length axis and the two offset bounds are needed.
+// That `s` axis is FastF1's raw Distance channel, the same one load_track_geometry uses --
+// NOT the periodic B-spline's own arc-length parameterization that resample() produces, so
+// callers matching this against a curvature array need to interpolate, not index directly.
+pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Box<dyn Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut s: Vec<f64> = Vec::new();
+    let mut n_left: Vec<f64> = Vec::new();
+    let mut n_right: Vec<f64> = Vec::new();
+
+    let mut lines = reader.lines();
+    lines.next(); // skip header
+
+    for line in lines {
+        let line = line?;
+        let mut cols = line.split(',');
+        let s_i = cols.next().ok_or("missing s")?.parse::<f64>()?;
+        cols.next().ok_or("missing x")?; // x, unused
+        cols.next().ok_or("missing y")?; // y, unused
+        let left = cols.next().ok_or("missing n_left")?.parse::<f64>()?;
+        let right = cols.next().ok_or("missing n_right")?.parse::<f64>()?;
+        s.push(s_i);
+        n_left.push(left);
+        n_right.push(right);
+    }
+
+    Ok((s, n_left, n_right))
+}
+
+
 pub fn export_curvature_csv(curvature: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
