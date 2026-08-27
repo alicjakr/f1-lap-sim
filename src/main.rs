@@ -1,8 +1,8 @@
 use std::env;
 use std::path::Path;
-use crate::optimal::{solve_min_time, solve_racing_line};
+use crate::optimal::{coarsen_stride, resample_bounds, solve_min_time, solve_racing_line};
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
-use crate::track::{export_curvature_csv, fit_periodic_bspline, load_boundaries, load_track_geometry, resample, total_length};
+use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_boundaries, load_track_geometry, offset_line, resample, total_length};
 
 mod track;
 mod solver;
@@ -25,6 +25,7 @@ fn main() {
     let simulated_lap_path = format!("data/{}_simulated_lap.csv", track);
     let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track);
     let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track);
+    let racingline_xy_path = format!("data/{}_racingline_path.csv", track);
     let boundaries_path = format!("data/{}_track_boundaries.csv", track);
 
     let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
@@ -115,6 +116,27 @@ fn main() {
         );
 
         export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_racingline_path)).unwrap();
+
+        // X/Y path for visualization: subsample the fine-resolution (ds=1m) resampled
+        // centerline with the same stride solve_racing_line used to build its coarse
+        // curvature grid, so index i here lines up with n_profile[i] exactly.
+        let stride = coarsen_stride(1.0, spacing);
+        let coarse_points: Vec<_> = resampled.iter().step_by(stride).cloned().collect();
+        let x_ref: Vec<f64> = coarse_points.iter().map(|p| p.x).collect();
+        let y_ref: Vec<f64> = coarse_points.iter().map(|p| p.y).collect();
+        let (x_line, y_line) = offset_line(&coarse_points, &n_profile);
+
+        let target_s: Vec<f64> = (0..coarse_points.len()).map(|i| i as f64 * ds_coarse).collect();
+        let (n_left_coarse, n_right_coarse) = resample_bounds(&bound_s, &n_left, &n_right, &target_s);
+        let (x_left, y_left) = offset_line(&coarse_points, &n_left_coarse);
+        let (x_right, y_right) = offset_line(&coarse_points, &n_right_coarse);
+
+        export_racing_line_csv(
+            &x_ref, &y_ref, &x_line, &y_line, &x_left, &y_left, &x_right, &y_right,
+            &n_profile, &v_final, ds_coarse, Path::new(&racingline_xy_path),
+        ).unwrap();
+        println!("Exported racing-line X/Y path -> {}", racingline_xy_path);
+
         return;
     }
 

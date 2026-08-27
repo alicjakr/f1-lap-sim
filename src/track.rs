@@ -3,9 +3,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
+#[derive(Clone, Copy)]
 pub struct Point {
-    x: f64,
-    y: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 
@@ -317,6 +318,64 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
     Ok((s, n_left, n_right))
 }
 
+
+// Offsets a closed-loop point sequence by a per-point lateral distance along its own
+// local left-normal direction (n>0 is left of driving direction, matching
+// python_scripts/export_osm_boundaries.py's convention). Used for visualization only --
+// the tangent is a central difference between neighbors (periodic wraparound), not the
+// analytic spline derivative, since by this point resample()'s per-point spline
+// parameter t is no longer available and a finite-difference tangent is accurate enough
+// for plotting.
+pub fn offset_line(points: &[Point], n_profile: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let m = points.len();
+    let mut x_out = Vec::with_capacity(m);
+    let mut y_out = Vec::with_capacity(m);
+    for i in 0..m {
+        let prev = (i + m - 1) % m;
+        let next = (i + 1) % m;
+        let tx = points[next].x - points[prev].x;
+        let ty = points[next].y - points[prev].y;
+        let mag = f64::hypot(tx, ty);
+        let (tx, ty) = (tx / mag, ty / mag);
+        let (nx, ny) = (-ty, tx);
+        x_out.push(points[i].x + n_profile[i] * nx);
+        y_out.push(points[i].y + n_profile[i] * ny);
+    }
+    (x_out, y_out)
+}
+
+pub fn export_racing_line_csv(
+    x_ref: &[f64],
+    y_ref: &[f64],
+    x_line: &[f64],
+    y_line: &[f64],
+    x_left: &[f64],
+    y_left: &[f64],
+    x_right: &[f64],
+    y_right: &[f64],
+    n_profile: &[f64],
+    velocity: &[f64],
+    ds: f64,
+    path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    writeln!(writer, "s,x_ref,y_ref,x_line,y_line,x_left,y_left,x_right,y_right,n,speed_kmh")?;
+
+    for i in 0..x_ref.len() {
+        let s = i as f64 * ds;
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{}",
+            s, x_ref[i], y_ref[i], x_line[i], y_line[i],
+            x_left[i], y_left[i], x_right[i], y_right[i],
+            n_profile[i], velocity[i] * 3.6,
+        )?;
+    }
+
+    Ok(())
+}
 
 pub fn export_curvature_csv(curvature: &[f64], ds: f64, path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;

@@ -90,10 +90,19 @@ const XI_REG_WEIGHT: f64 = 2000.0;
 // way as XI_REG_WEIGHT.
 const KAPPA_REG_WEIGHT: f64 = 2000.0;
 
+/// Sample stride for coarsening a full-resolution (ds=full_ds) array down to roughly
+/// `target_spacing` meters between points. Exposed so callers with a matching
+/// full-resolution array indexed the same way as the curvature array (e.g. main.rs's
+/// resampled X/Y points) can subsample it to line up index-for-index with solve_min_time/
+/// solve_racing_line's coarse grid.
+pub fn coarsen_stride(full_ds: f64, target_spacing: f64) -> usize {
+    (target_spacing / full_ds).round().max(1.0) as usize
+}
+
 /// Subsamples a full-resolution (ds=1m) curvature array down to roughly `target_spacing`
 /// meters between points, returning the coarse curvature array and its new ds.
 fn coarsen(curvature: &[f64], full_ds: f64, target_spacing: f64) -> (Vec<f64>, f64) {
-    let stride = (target_spacing / full_ds).round().max(1.0) as usize;
+    let stride = coarsen_stride(full_ds, target_spacing);
     let coarse: Vec<f64> = curvature.iter().step_by(stride).cloned().collect();
     (coarse, full_ds * stride as f64)
 }
@@ -465,7 +474,7 @@ pub fn solve_min_time(
 /// array's own arc-length parameterization (the periodic B-spline's, via track::resample)
 /// -- both measure the same physical lap distance, just via slightly different paths, and
 /// treating them as equivalent here is an accepted approximation (see track::load_boundaries).
-fn resample_bounds(bound_s: &[f64], n_left: &[f64], n_right: &[f64], target_s: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub fn resample_bounds(bound_s: &[f64], n_left: &[f64], n_right: &[f64], target_s: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let total = *bound_s.last().unwrap();
     let mut out_left = Vec::with_capacity(target_s.len());
     let mut out_right = Vec::with_capacity(target_s.len());
