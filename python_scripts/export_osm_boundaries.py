@@ -189,6 +189,41 @@ def chain_segments(segments):
     return chain, max(gaps)
 
 
+def despike_offset(s, center_offset, half_width, jump_threshold=5.0, outlier_threshold=6.0):
+    """The nearest-OSM-point lookup below is a pure 2D spatial search, blind to track
+    topology -- it occasionally snaps onto a different, nearby lobe of the track for a
+    contiguous run of reference-line samples. Most visibly: Suzuka's crossover point,
+    where the track physically passes over/under itself, and Shanghai's tightly nested
+    corners. This shows up as a run of samples sitting on a stable but wrong center_offset
+    plateau (tens of meters off), bounded by sharp single-sample jumps in and out -- not
+    gradual drift, so a plain magnitude threshold would miss plateaus that happen to sit
+    just under it (observed on Suzuka: one plateau at -16m, next at +15m, straddling any
+    single cutoff). Detect plateaus by their boundary jumps, keep only the ones whose mean
+    is actually far from the track-wide median (a real corner's smooth offset swing never
+    contains a single-sample jump this large), then linearly interpolate across them from
+    the surrounding good samples.
+    """
+    diffs = np.diff(center_offset)
+    boundaries = np.where(np.abs(diffs) > jump_threshold)[0] + 1
+    seg_starts = np.concatenate([[0], boundaries])
+    seg_ends = np.concatenate([boundaries, [len(center_offset)]])
+    median = np.median(center_offset)
+    bad = np.zeros(len(center_offset), dtype=bool)
+    for a, b in zip(seg_starts, seg_ends):
+        if abs(center_offset[a:b].mean() - median) > outlier_threshold:
+            bad[a:b] = True
+    n_bad = int(bad.sum())
+    if n_bad == 0:
+        return center_offset, half_width, 0
+    good = ~bad
+    period = (s[-1] - s[0]) * len(s) / (len(s) - 1)  # pad by one average sample gap
+    center_fixed = center_offset.copy()
+    half_width_fixed = half_width.copy()
+    center_fixed[bad] = np.interp(s[bad], s[good], center_offset[good], period=period)
+    half_width_fixed[bad] = np.interp(s[bad], s[good], half_width[good], period=period)
+    return center_fixed, half_width_fixed, n_bad
+
+
 def project_to_local_meters(lats, lons):
     lat0, lon0 = lats.mean(), lons.mean()
     x = EARTH_RADIUS_M * np.radians(lons - lon0) * np.cos(np.radians(lat0))
@@ -329,6 +364,14 @@ def main():
     dy = registered[nearest, 1] - cy
     center_offset = dx * nx + dy * ny
     half_width = widths[nearest] / 2.0
+
+    center_offset, half_width, n_despiked = despike_offset(s, center_offset, half_width)
+    if n_despiked:
+        print(
+            f"Despiked {n_despiked} sample(s) where the nearest-OSM-point lookup snapped "
+            "onto the wrong lobe of the track (e.g. a crossover or tightly nested corner) -- "
+            "replaced with interpolation from surrounding good samples."
+        )
 
     n_left = center_offset + half_width
     n_right = center_offset - half_width
