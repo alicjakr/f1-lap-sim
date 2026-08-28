@@ -49,14 +49,29 @@ surface. Real approximations in this pipeline, in order:
    in the road) -- what the racing-line optimizer actually needs. n > 0 is left of the
    driving direction, n < 0 is right; n_right[i] <= n[i] <= n_left[i].
 5. despike_offset() cleans up two shapes of nearest-point matching error (see its own
-   docstring). Singapore has a known THIRD, still-unfixed shape beyond those two: several
-   smaller offset excursions (~7-17m, decaying gradually back to baseline over 100+ m) that
-   overlap in both magnitude and duration with genuine registration noise confirmed on
-   Monaco (up to ~16m) -- no threshold/duration heuristic tried so far separates them
-   reliably without risking false positives elsewhere. racing-line mode (src/optimal.rs)
-   still reports infeasible on Singapore as of this writing; despiking got its offset range
-   down from +/-88m to +/-12m, a real improvement, but not enough to solve. Left unresolved
-   rather than forcing a track-specific patch into general code.
+   docstring), calibrated against a cross-track compromise (jump/outlier/hysteresis
+   defaults) that has to hold simultaneously for every track's genuine registration noise.
+   That compromise isn't tight enough for every track: Red Bull Ring and Yas Marina both
+   had real leftover artifacts sitting *under* the shared defaults but clearly separated
+   from each track's own genuine variation (checked via each track's own deviation
+   percentiles, not cross-track comparison) -- fixed with --jump-threshold/
+   --outlier-threshold/--hysteresis-high/--hysteresis-low overrides tuned per track:
+     redbullring: --jump-threshold 10 --outlier-threshold 6 --hysteresis-high 8 --hysteresis-low 5
+     yasmarina:   --jump-threshold 13 --outlier-threshold 8 --hysteresis-high 13 --hysteresis-low 8
+   Both validated via racing-line mode (src/optimal.rs) converging with the expected
+   negative-or-near-zero delta against the fixed-line lap time.
+6. Singapore has a known FOURTH, still-unfixed failure mode, structurally different from
+   despike_offset's target: at several points the boundary's effective WIDTH itself jumps
+   abruptly (e.g. n_left moves ~12m while n_right barely moves, over one ~25m solver grid
+   step) -- most likely a lane-count tag change between adjacent OSM ways, not a
+   nearest-point mismatch. center_offset deviation at these points is mild enough (under
+   10m) that no despike_offset threshold flags it, and wouldn't be the right tool anyway
+   since the problem is the WIDTH channel's rate of change, not either boundary's distance
+   from the track median. racing-line mode still reports infeasible on Singapore -- the
+   boundary interval shifts faster than the solver's steering-rate limit (xi_bound) can
+   track, regardless of whether the underlying OSM data is "correct." A fix would need a
+   slew-rate limiter on n_left(s)/n_right(s) directly (not despike_offset's magnitude-based
+   detection). Left unresolved rather than forcing a partial fix into general code.
 
 Usage:
   python export_osm_boundaries.py --track singapore --relation-name "Marina Bay"
@@ -340,6 +355,10 @@ def main():
     parser.add_argument("--track", required=True, help="Track slug matching data/<slug>_track_geometry.csv")
     parser.add_argument("--relation-name", help="OSM circuit relation name search string, e.g. 'Marina Bay' (street circuits)")
     parser.add_argument("--bbox", type=parse_bbox, help="'lat_min,lon_min,lat_max,lon_max' fallback for circuits with no relation (permanent circuits)")
+    parser.add_argument("--jump-threshold", type=float, default=14.0, help="despike_offset: per-step jump size (m) that seeds a bad plateau (default 14.0, tuned against Baku/Monaco/Suzuka/Shanghai; override per-track if the default's cross-track compromise doesn't separate this track's own genuine vs. artifact magnitudes)")
+    parser.add_argument("--outlier-threshold", type=float, default=10.0, help="despike_offset: how far a jump-bounded segment's mean must sit from the track median to count as bad (default 10.0)")
+    parser.add_argument("--hysteresis-high", type=float, default=20.0, help="despike_offset: deviation from median (m) that seeds a bad region for the gradual-drift detector (default 20.0)")
+    parser.add_argument("--hysteresis-low", type=float, default=10.0, help="despike_offset: deviation from median (m) a bad region floods outward through (default 10.0)")
     args = parser.parse_args()
     slug = args.track.lower()
     if not args.relation_name and not args.bbox:
@@ -416,7 +435,11 @@ def main():
     center_offset = dx * nx + dy * ny
     half_width = widths[nearest] / 2.0
 
-    center_offset, half_width, n_despiked = despike_offset(s, center_offset, half_width)
+    center_offset, half_width, n_despiked = despike_offset(
+        s, center_offset, half_width,
+        jump_threshold=args.jump_threshold, outlier_threshold=args.outlier_threshold,
+        hysteresis_high=args.hysteresis_high, hysteresis_low=args.hysteresis_low,
+    )
     if n_despiked:
         print(
             f"Despiked {n_despiked} sample(s) where the nearest-OSM-point lookup snapped "
