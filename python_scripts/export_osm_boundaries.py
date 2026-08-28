@@ -48,6 +48,15 @@ surface. Real approximations in this pipeline, in order:
    *offsets from our own reference line* (the FastF1 driven line, not necessarily centered
    in the road) -- what the racing-line optimizer actually needs. n > 0 is left of the
    driving direction, n < 0 is right; n_right[i] <= n[i] <= n_left[i].
+5. despike_offset() cleans up two shapes of nearest-point matching error (see its own
+   docstring). Singapore has a known THIRD, still-unfixed shape beyond those two: several
+   smaller offset excursions (~7-17m, decaying gradually back to baseline over 100+ m) that
+   overlap in both magnitude and duration with genuine registration noise confirmed on
+   Monaco (up to ~16m) -- no threshold/duration heuristic tried so far separates them
+   reliably without risking false positives elsewhere. racing-line mode (src/optimal.rs)
+   still reports infeasible on Singapore as of this writing; despiking got its offset range
+   down from +/-88m to +/-12m, a real improvement, but not enough to solve. Left unresolved
+   rather than forcing a track-specific patch into general code.
 
 Usage:
   python export_osm_boundaries.py --track singapore --relation-name "Marina Bay"
@@ -189,28 +198,45 @@ def chain_segments(segments):
     return chain, max(gaps)
 
 
-def despike_offset(s, center_offset, half_width, jump_threshold=14.0, outlier_threshold=10.0):
+def despike_offset(
+    s, center_offset, half_width,
+    jump_threshold=14.0, outlier_threshold=10.0,
+    hysteresis_high=20.0, hysteresis_low=10.0,
+):
     """The nearest-OSM-point lookup below is a pure 2D spatial search, blind to track
-    topology -- it occasionally snaps onto a different, nearby lobe of the track for a
-    contiguous run of reference-line samples. Most visibly: Suzuka's crossover point,
-    where the track physically passes over/under itself, and Shanghai's tightly nested
-    corners. This shows up as a run of samples sitting on a stable but wrong center_offset
-    plateau (tens of meters off), bounded by sharp single-sample jumps in and out -- not
-    gradual drift, so a plain magnitude threshold would miss plateaus that happen to sit
-    just under it (observed on Suzuka: one plateau at -16m, next at +15m, straddling any
-    single cutoff). Detect plateaus by their boundary jumps, keep only the ones whose mean
-    is actually far from the track-wide median (a real corner's smooth offset swing never
-    contains a single-sample jump this large), then linearly interpolate across them from
+    topology, and fails in two different shapes -- each needs its own detector:
+
+    1. Sharp snap-to-wrong-lobe: a run of samples jumps onto a stable but wrong
+       center_offset plateau (tens of meters off), bounded by sharp single-sample jumps
+       in and out. Most visibly Suzuka's crossover point (the track physically passes
+       over/under itself) and Shanghai's tightly nested corners. Caught below by
+       `jump_threshold`/`outlier_threshold`: detect plateaus by their boundary jumps
+       (a real corner's smooth offset swing never contains a jump this large), keep only
+       the ones whose mean is actually far from the track-wide median -- a magnitude
+       threshold alone would miss plateaus that happen to sit just under it (observed on
+       Suzuka: one plateau at -16m, next at +15m, straddling any single cutoff).
+
+    2. Gradual multi-way drift: found on Singapore, where the nearest match wanders
+       through a sequence of different OSM ways (a nearby paddock/pit-access road,
+       probably), climbing smoothly to an offset of 88m over ~180m of track and back --
+       no single jump between consecutive samples ever exceeds `jump_threshold`, so
+       detector 1 misses most of it. Caught below by hysteresis thresholding (as in
+       Canny edge detection): a point beyond `hysteresis_high` seeds a bad region, which
+       then floods outward through neighbors while they stay above the looser
+       `hysteresis_low` -- this bounds the region at where the drift actually returns to
+       near-baseline, rather than at some fixed magnitude.
+
+    Both detectors' bad masks are OR'd together, then linearly interpolated across from
     the surrounding good samples.
 
-    Both thresholds sit in the gap between two observed clusters: Baku's genuine narrow
-    "castle section" chicane produces real jumps/deviations up to ~13.5m (checked directly
-    against its exported CSV -- despiking at the previous, tighter thresholds wrongly
-    flagged 30 samples there), while Suzuka and Shanghai's wrong-lobe snaps start at ~16m
-    and run up to 95m. 14/10 clears Baku's genuine swings and still catches the smallest
-    confirmed wrong-lobe jump with margin; there's no guarantee every future track's real
-    geometry stays under this line, so a large despike count on a new track is worth a
-    second look rather than trusting it blindly.
+    Thresholds sit in the gap between two observed clusters: Baku's genuine narrow
+    "castle section" chicane produces real jumps/deviations up to ~13.5m, and Monaco's
+    genuine registration noise peaks at ~16.4m deviation from median with no sharp jumps
+    at all (checked directly against both tracks' exported CSVs -- tighter thresholds
+    previously flagged 30 real Baku samples). Suzuka and Shanghai's wrong-lobe snaps
+    start at ~16m and run up to 95m; Singapore's drift runs from ~14m up to 88m. There's
+    no guarantee every future track's real geometry stays under these lines, so a large
+    despike count on a new track is worth a second look rather than trusting it blindly.
     """
     diffs = np.diff(center_offset)
     boundaries = np.where(np.abs(diffs) > jump_threshold)[0] + 1
@@ -221,6 +247,22 @@ def despike_offset(s, center_offset, half_width, jump_threshold=14.0, outlier_th
     for a, b in zip(seg_starts, seg_ends):
         if abs(center_offset[a:b].mean() - median) > outlier_threshold:
             bad[a:b] = True
+
+    dev = np.abs(center_offset - median)
+    hyst_bad = dev > hysteresis_high
+    changed = True
+    while changed:
+        changed = False
+        grow_fwd = np.zeros_like(hyst_bad)
+        grow_fwd[1:] = hyst_bad[:-1] & ~hyst_bad[1:] & (dev[1:] > hysteresis_low)
+        grow_bwd = np.zeros_like(hyst_bad)
+        grow_bwd[:-1] = hyst_bad[1:] & ~hyst_bad[:-1] & (dev[:-1] > hysteresis_low)
+        grow = grow_fwd | grow_bwd
+        if grow.any():
+            hyst_bad |= grow
+            changed = True
+    bad |= hyst_bad
+
     n_bad = int(bad.sum())
     if n_bad == 0:
         return center_offset, half_width, 0
