@@ -189,7 +189,7 @@ def chain_segments(segments):
     return chain, max(gaps)
 
 
-def despike_offset(s, center_offset, half_width, jump_threshold=5.0, outlier_threshold=6.0):
+def despike_offset(s, center_offset, half_width, jump_threshold=14.0, outlier_threshold=10.0):
     """The nearest-OSM-point lookup below is a pure 2D spatial search, blind to track
     topology -- it occasionally snaps onto a different, nearby lobe of the track for a
     contiguous run of reference-line samples. Most visibly: Suzuka's crossover point,
@@ -202,6 +202,15 @@ def despike_offset(s, center_offset, half_width, jump_threshold=5.0, outlier_thr
     is actually far from the track-wide median (a real corner's smooth offset swing never
     contains a single-sample jump this large), then linearly interpolate across them from
     the surrounding good samples.
+
+    Both thresholds sit in the gap between two observed clusters: Baku's genuine narrow
+    "castle section" chicane produces real jumps/deviations up to ~13.5m (checked directly
+    against its exported CSV -- despiking at the previous, tighter thresholds wrongly
+    flagged 30 samples there), while Suzuka and Shanghai's wrong-lobe snaps start at ~16m
+    and run up to 95m. 14/10 clears Baku's genuine swings and still catches the smallest
+    confirmed wrong-lobe jump with margin; there's no guarantee every future track's real
+    geometry stays under this line, so a large despike count on a new track is worth a
+    second look rather than trusting it blindly.
     """
     diffs = np.diff(center_offset)
     boundaries = np.where(np.abs(diffs) > jump_threshold)[0] + 1
