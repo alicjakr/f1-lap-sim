@@ -319,6 +319,21 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
 }
 
 
+// Reads python_scripts/derive_downforce.py's output: one row, c_l,c_d -- per-track aero
+// coefficients derived from that track's own real telemetry (apex lateral acceleration,
+// top speed), in place of main.rs's 3-tier HIGH/MED/LOW_DOWNFORCE guess.
+pub fn load_aero_params(path: &Path) -> Result<(f64, f64), Box<dyn Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut lines = reader.lines();
+    lines.next(); // skip header
+    let line = lines.next().ok_or("empty aero_params.csv")??;
+    let mut cols = line.split(',');
+    let c_l = cols.next().ok_or("missing c_l")?.parse::<f64>()?;
+    let c_d = cols.next().ok_or("missing c_d")?.parse::<f64>()?;
+    Ok((c_l, c_d))
+}
+
+
 // Reads python_scripts/export_track.py's drs_zones.csv: s,drs_open. Same raw FastF1
 // Distance axis as load_boundaries (not resample()'s own arc-length parameterization), so
 // callers matching this against a curvature array need to interpolate via

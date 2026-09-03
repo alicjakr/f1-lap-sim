@@ -1,8 +1,8 @@
 use std::env;
 use std::path::Path;
 use crate::optimal::{coarsen_stride, resample_bounds, solve_min_time, solve_racing_line};
-use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
-use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_boundaries, load_drs_zones, load_track_geometry, offset_line, resample, total_length};
+use crate::solver::{lap_time, CarParams, export_velocity_csv};
+use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_aero_params, load_boundaries, load_drs_zones, load_track_geometry, offset_line, resample, total_length};
 
 mod track;
 mod solver;
@@ -32,6 +32,7 @@ fn main() {
     let racingline_xy_path = format!("data/{}_racingline_path.csv", track);
     let boundaries_path = format!("data/{}_track_boundaries.csv", track);
     let drs_zones_path = format!("data/{}_drs_zones.csv", track);
+    let aero_params_path = format!("data/{}_aero_params.csv", track);
 
     let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
     let length = total_length(&track_geometry, &t);
@@ -57,12 +58,14 @@ fn main() {
     // load is highest; it was a two-pass crutch, not real physics, so removed from both
     // solvers rather than kept as an inconsistency between them.
     //
-    // c_l/c_d are wing-level choices real teams change per circuit, so they're derived
-    // per track below rather than as one universal figure. Published Cl/Cd for two known
-    // reference points (Monaco, max downforce: 2.89; Monza, min downforce: 2.98) show the
-    // L/D ratio stays roughly constant (~2.9) across downforce levels -- what actually
-    // changes is the absolute Cd. Three tiers, Cd scaled from Monaco/Monza's own historical
-    // Cd (1.08 / 0.68) with Cl = Cd*2.9, A = 1.4 m², rho = 1.225 kg/m^3, c_x = 0.5*rho*Cx*A/m.
+    // c_l/c_d are wing-level choices real teams change per circuit. Preferred source: real
+    // per-track values from python_scripts/derive_downforce.py, which derives both straight
+    // from that track's own telemetry (apex lateral acceleration for c_l, top speed for
+    // c_d) rather than guessing which tier a circuit belongs to -- validated to drop the
+    // racing-line solver's mean gap to real 2018 pole times from +16.3% to +0.9% across all
+    // 15 working tracks (see that script's docstring). Falls back to a coarse 3-tier
+    // classification below for a track with no derived data/<slug>_aero_params.csv (e.g.
+    // one outside the 15-track working set, or a fresh track before running that script).
     const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
     const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);  // Cd=0.85, Cl=2.47
     const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
@@ -88,6 +91,7 @@ fn main() {
         | "sochi" | "suzuka" | "cota" | "mexico" | "interlagos" | "yasmarina" => MED_DOWNFORCE,
         _ => MED_DOWNFORCE, // fallback for unrecognized slugs
     };
+    let (c_l, c_d) = load_aero_params(Path::new(&aero_params_path)).unwrap_or((c_l, c_d));
     let parameters = CarParams {
         mu_lat: 1.6,
         mu_lon: 1.55,
