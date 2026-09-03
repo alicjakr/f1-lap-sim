@@ -51,6 +51,25 @@ with few genuine high-speed corners (Monza, Montreal) get very few qualifying sa
 -- likely reflects genuine track character rather than a detection failure, but worth a
 second look if a future track's derived value looks implausible.
 
+Why mu_lat is still fixed, not derived per track: a_lat = mu_lat*(G + c_l*v^2) is one
+equation in two unknowns at a single apex point, so mu_lat has to be fixed to solve for c_l
+at all -- but that equation IS linear in v^2 (intercept mu_lat*G, slope mu_lat*c_l), so a
+single regression of every qualifying apex's a_lat against v^2 should identify both jointly.
+Tried it -- rejected. Loosening the apex speed floor to feed the regression a wide v^2 range
+let through points that aren't real corners at all: on a flat-out straight, |dv/ds| is also
+near zero (constant top speed satisfies "quasi-steady-state" as well as a real apex does),
+so a tiny residual curvature from GPS noise or a gentle kink was enough to pass the
+MIN_CURVATURE filter at very high speed (e.g. a "274 km/h apex" at Yas Marina, curvature
+just above threshold). Those points sit far out in v^2, so ordinary least squares gives them
+huge leverage, and they wildly distorted the intercept extrapolated back to v=0 -- derived
+mu_lat came out 2.1-6.3 across tracks (vs. the published 1.4-1.8) with R^2 as low as 0.04-0.2
+on most tracks, and two tracks failed outright (Monza: too few points after the floor;
+Red Bull Ring: negative slope, i.e. downforce implied to reduce grip). The median-based c_l
+estimate above tolerates the same stray points fine -- a median just ignores a few outliers,
+where a regression's intercept is exactly the term those outliers distort most. Left as a
+fixed global mu_lat=1.6 rather than chasing a stricter apex filter that would just reintroduce
+the original too-few-samples problem this script's c_l method was built to avoid.
+
 Usage:
   python derive_downforce.py --track monaco
 
