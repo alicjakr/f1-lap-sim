@@ -2,7 +2,7 @@ use std::env;
 use std::path::Path;
 use crate::optimal::{coarsen_stride, resample_bounds, solve_min_time, solve_racing_line};
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, lap_time, CarParams, export_velocity_csv};
-use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_boundaries, load_track_geometry, offset_line, resample, total_length};
+use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_boundaries, load_drs_zones, load_track_geometry, offset_line, resample, total_length};
 
 mod track;
 mod solver;
@@ -27,6 +27,7 @@ fn main() {
     let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track);
     let racingline_xy_path = format!("data/{}_racingline_path.csv", track);
     let boundaries_path = format!("data/{}_track_boundaries.csv", track);
+    let drs_zones_path = format!("data/{}_drs_zones.csv", track);
 
     let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
     let length = total_length(&track_geometry, &t);
@@ -62,6 +63,13 @@ fn main() {
     const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);  // Cd=0.85, Cl=2.47
     const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
 
+    // DRS (rear wing flap) cuts drag by roughly 10-15% while open, per published estimates;
+    // it never affects cornering since it's closed again before the braking zone. Applied as
+    // a flat reduction on whichever downforce tier's Cd is already chosen above, in the
+    // per-point drag profile built from data/<slug>_drs_zones.csv (see optimal::resample_drs)
+    // -- not a fourth downforce tier of its own.
+    const DRS_DRAG_REDUCTION: f64 = 0.88;
+
     // 2018 calendar (21 rounds), tiered by circuit character: tight/technical -> high,
     // long-straight power circuits -> low, everything else -> medium. Monaco/Hungaroring/
     // Singapore/Monza/Spa/Baku are well-sourced as tier extremes; most "medium" placements
@@ -81,10 +89,17 @@ fn main() {
         mu_lon: 1.55,
         c_l,
         c_d,
+        c_d_drs: c_d * DRS_DRAG_REDUCTION,
         p_engine: 1015.0,
     };
+
+    // Per-point DRS-open flag along the same driven lap the geometry above came from (see
+    // export_track.py's drs_zones.csv) -- missing for a track with no DRS export (e.g. one
+    // exported before this feature existed), in which case every point falls back to
+    // params.c_d (DRS always closed).
+    let (drs_s, drs_open) = load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
     if mode == "optimal" {
-        let (v_final, obj_lap_time, ds_coarse) = solve_min_time(&curvature, 1.0, &parameters, spacing);
+        let (v_final, obj_lap_time, ds_coarse) = solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;
         println!("Lap time (optimal, objective value): {}:{:06.3}", minutes, seconds);
@@ -97,7 +112,7 @@ fn main() {
     if mode == "racingline" {
         let (bound_s, n_left, n_right) = load_boundaries(Path::new(&boundaries_path)).unwrap();
         let (v_final, n_profile, racing_line_time, ds_coarse) =
-            solve_racing_line(&curvature, 1.0, &parameters, spacing, &bound_s, &n_left, &n_right);
+            solve_racing_line(&curvature, 1.0, &parameters, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open);
         let minutes = (racing_line_time / 60.0) as u32;
         let seconds = racing_line_time % 60.0;
         println!("Lap time (racing line): {}:{:06.3}", minutes, seconds);
@@ -109,7 +124,7 @@ fn main() {
         // n=0 is a feasible point of this same problem (it's exactly the fixed-line
         // problem), so the racing line can never come out slower -- a useful built-in
         // correctness check, not just a comparison.
-        let (_, fixed_line_time, _) = solve_min_time(&curvature, 1.0, &parameters, spacing);
+        let (_, fixed_line_time, _) = solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
         println!(
             "Fixed-line optimal lap time for comparison: {:.3}s (racing line should be <= this; delta = {:.3}s)",
             fixed_line_time, racing_line_time - fixed_line_time

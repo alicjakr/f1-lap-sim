@@ -4,6 +4,7 @@ Export track geometry and reference speed trace from a FastF1 lap to CSV.
 Outputs (per track/driver, so multiple tracks can coexist under data/):
   data/<slug>_track_geometry.csv   — Distance, X, Y columns (meters)
   data/<slug>_reference_lap.csv    — Distance, Speed columns (meters, km/h)
+  data/<slug>_drs_zones.csv        — Distance, drs_open columns (meters, bool)
 
 Distance is FastF1's own telemetry channel (integrated from Speed), not recomputed
 from X/Y. On fast tracks the position (X/Y) samples can go stale/repeat between GPS
@@ -70,8 +71,19 @@ reference = tel[["Distance", "Speed"]].dropna().reset_index(drop=True)
 reference_path = f"data/{slug}_reference_lap.csv"
 reference.to_csv(reference_path, index=False)
 
+# drs_zones.csv — per-point DRS-open flag along this same driven lap, used as a proxy for
+# the real FIA zone boundaries (exact zone geometry isn't in FastF1's data; this driver's
+# actual DRS usage on a competitive quali lap tracks the real zone closely). FastF1's DRS
+# channel: 0/1 = off, 8 = detected/eligible (not yet activated), 10/12/14 = active.
+drs = tel[["Distance", "DRS"]].dropna().reset_index(drop=True)
+drs["drs_open"] = drs["DRS"] >= 10
+drs = drs[["Distance", "drs_open"]]
+drs_path = f"data/{slug}_drs_zones.csv"
+drs.to_csv(drs_path, index=False)
+
 print(f"Exported {len(geometry)} geometry points → {geometry_path}")
 print(f"Exported {len(reference)} reference points → {reference_path}")
+print(f"Exported {len(drs)} DRS-zone points ({int(drs['drs_open'].sum())} open) → {drs_path}")
 print(f"Lap: {args.year} {args.track} {args.session_type}, driver {args.driver}, lap {lap['LapNumber']}")
 print(f"Lap time: {lap['LapTime']}")
 print(f"Track length (approx): {tel['Distance'].max():.0f} m")

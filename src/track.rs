@@ -319,6 +319,31 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
 }
 
 
+// Reads python_scripts/export_track.py's drs_zones.csv: s,drs_open. Same raw FastF1
+// Distance axis as load_boundaries (not resample()'s own arc-length parameterization), so
+// callers matching this against a curvature array need to interpolate via
+// optimal::resample_drs, not index directly.
+pub fn load_drs_zones(path: &Path) -> Result<(Vec<f64>, Vec<bool>), Box<dyn Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut s: Vec<f64> = Vec::new();
+    let mut drs_open: Vec<bool> = Vec::new();
+
+    let mut lines = reader.lines();
+    lines.next(); // skip header
+
+    for line in lines {
+        let line = line?;
+        let mut cols = line.split(',');
+        let s_i = cols.next().ok_or("missing s")?.parse::<f64>()?;
+        let open = cols.next().ok_or("missing drs_open")?.trim();
+        s.push(s_i);
+        drs_open.push(open.eq_ignore_ascii_case("true"));
+    }
+
+    Ok((s, drs_open))
+}
+
+
 // Offsets a closed-loop point sequence by a per-point lateral distance along its own
 // local left-normal direction (n>0 is left of driving direction, matching
 // python_scripts/export_osm_boundaries.py's convention). Used for visualization only --

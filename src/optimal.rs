@@ -43,7 +43,7 @@
 
 use ipopt::*;
 
-use crate::solver::{backward_pass, corner_speed_limits, forward_pass, top_speed, CarParams};
+use crate::solver::{backward_pass, corner_speed_limits, forward_pass, top_speed_drs, CarParams};
 
 const G: f64 = 9.81;
 
@@ -110,6 +110,7 @@ fn coarsen(curvature: &[f64], full_ds: f64, target_spacing: f64) -> (Vec<f64>, f
 struct MinTimeProblem {
     curvature: Vec<f64>,
     params: CarParams,
+    c_d: Vec<f64>, // per-point drag coefficient: params.c_d_drs where DRS is open, else params.c_d
     ds: f64,
     n: usize,
     x_min: f64,
@@ -199,7 +200,7 @@ impl ConstrainedProblem for MinTimeProblem {
         }
         for i in 0..self.n {
             g[2 * self.n + i] =
-                us[i] - self.params.p_engine / xs[i].sqrt() + self.params.c_d * xs[i];
+                us[i] - self.params.p_engine / xs[i].sqrt() + self.c_d[i] * xs[i];
         }
         true
     }
@@ -278,7 +279,7 @@ impl ConstrainedProblem for MinTimeProblem {
         }
         // Power P(x,u) = u - p_engine/sqrt(x) + c_d*x
         for i in 0..self.n {
-            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.params.c_d;
+            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.c_d[i];
             vals[k] = dp_dx;
             k += 1;
             vals[k] = 1.0;
@@ -344,25 +345,34 @@ impl ConstrainedProblem for MinTimeProblem {
 
 /// Solves the minimum-time velocity profile over one closed lap on a coarse grid
 /// (~target_spacing meters between collocation points, subsampled from the full-resolution
-/// curvature array). Returns (velocity profile, lap time, coarse ds).
+/// curvature array). drs_s/drs_open are python_scripts/export_track.py's drs_zones.csv,
+/// resampled here onto the coarse grid via resample_drs -- pass empty slices for a track
+/// with no DRS data (every point then uses params.c_d, i.e. DRS always closed).
+/// Returns (velocity profile, lap time, coarse ds).
 pub fn solve_min_time(
     curvature_full: &[f64],
     full_ds: f64,
     params: &CarParams,
     target_spacing: f64,
+    drs_s: &[f64],
+    drs_open: &[bool],
 ) -> (Vec<f64>, f64, f64) {
     let (curvature, ds) = coarsen(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
     // Warm start from the existing two-pass sweep on the same coarse grid (not periodic,
     // just a reasonable initial guess -- the NLP's own periodicity constraint resolves the
-    // seam that the padded-laps trick used to paper over).
+    // seam that the padded-laps trick used to paper over). DRS isn't modeled in this warm
+    // start (uses the constant DRS-closed params.c_d) -- it only needs to be a reasonable
+    // starting guess, not itself correct.
     let corner_lims = corner_speed_limits(&curvature, params);
     let v_back = backward_pass(&curvature, &corner_lims, params, ds);
     let v_init = forward_pass(&curvature, &v_back, params, ds);
 
     let x_min = 5.0 * 5.0; // 5 m/s floor, avoids sqrt(0) and a stationary car mid-lap
-    let x_max = top_speed(params).powi(2);
+    // Sized off the DRS-open (lower-drag, higher-top-speed) case so a DRS zone's real speed
+    // potential isn't clipped by a bound sized off the DRS-closed drag alone.
+    let x_max = top_speed_drs(params).powi(2);
     let initial_x: Vec<f64> = v_init.iter().map(|v| v.powi(2).clamp(x_min, x_max)).collect();
     let initial_u: Vec<f64> = (0..n)
         .map(|i| {
@@ -372,6 +382,16 @@ pub fn solve_min_time(
         .collect();
     let u_bound = 10.0 * G; // loose box; the ellipse/power constraints bind first
 
+    let target_s: Vec<f64> = (0..n).map(|i| i as f64 * ds).collect();
+    let c_d: Vec<f64> = if drs_s.is_empty() {
+        vec![params.c_d; n]
+    } else {
+        resample_drs(drs_s, drs_open, &target_s)
+            .iter()
+            .map(|&open| if open { params.c_d_drs } else { params.c_d })
+            .collect()
+    };
+
     let problem = MinTimeProblem {
         curvature,
         params: CarParams {
@@ -379,8 +399,10 @@ pub fn solve_min_time(
             mu_lon: params.mu_lon,
             c_l: params.c_l,
             c_d: params.c_d,
+            c_d_drs: params.c_d_drs,
             p_engine: params.p_engine,
         },
+        c_d,
         ds,
         n,
         x_min,
@@ -492,9 +514,29 @@ pub fn resample_bounds(bound_s: &[f64], n_left: &[f64], n_right: &[f64], target_
     (out_left, out_right)
 }
 
+/// Nearest-sample resample of a boolean DRS-open signal (python_scripts/export_track.py's
+/// drs_zones.csv, on the same raw FastF1 Distance axis as load_boundaries -- see that
+/// function's comment) onto the solver's coarse grid `target_s[i] = i*ds`. Nearest-sample
+/// rather than resample_bounds's linear interpolation since there's no sensible
+/// "in-between" value for a boolean -- DRS zones (hundreds of meters) are comfortably
+/// larger than one coarse grid cell, so nearest-sample doesn't lose a zone entirely.
+pub fn resample_drs(drs_s: &[f64], drs_open: &[bool], target_s: &[f64]) -> Vec<bool> {
+    let total = *drs_s.last().unwrap();
+    let mut out = Vec::with_capacity(target_s.len());
+    for &s in target_s {
+        let s = s.rem_euclid(total);
+        let idx = drs_s.partition_point(|&ds| ds <= s).saturating_sub(1).min(drs_s.len() - 2);
+        let (s_lo, s_hi) = (drs_s[idx], drs_s[idx + 1]);
+        let nearest = if s_hi > s_lo && (s - s_lo) > (s_hi - s) { idx + 1 } else { idx };
+        out.push(drs_open[nearest]);
+    }
+    out
+}
+
 struct RacingLineProblem {
     curvature: Vec<f64>, // kappa_ref
     params: CarParams,
+    c_d: Vec<f64>, // per-point drag coefficient: params.c_d_drs where DRS is open, else params.c_d
     ds: f64,
     n: usize,
     x_min: f64,
@@ -666,7 +708,7 @@ impl ConstrainedProblem for RacingLineProblem {
         }
         for i in 0..n {
             g[4 * n + i] =
-                us[i] - self.params.p_engine / xs[i].sqrt() + self.params.c_d * xs[i];
+                us[i] - self.params.p_engine / xs[i].sqrt() + self.c_d[i] * xs[i];
         }
         true
     }
@@ -771,7 +813,7 @@ impl ConstrainedProblem for RacingLineProblem {
             vals[k] = de_dkappa; k += 1;
         }
         for i in 0..n {
-            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.params.c_d;
+            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.c_d[i];
             vals[k] = dp_dx; k += 1;
             vals[k] = 1.0; k += 1;
         }
@@ -879,8 +921,10 @@ impl ConstrainedProblem for RacingLineProblem {
 }
 
 /// Solves the minimum-time problem with a free lateral offset (racing line) on the same
-/// coarse grid solve_min_time uses, plus track-boundary bounds on that offset. Returns
-/// (velocity profile, lateral offset profile, lap time, coarse ds).
+/// coarse grid solve_min_time uses, plus track-boundary bounds on that offset. drs_s/
+/// drs_open are python_scripts/export_track.py's drs_zones.csv (see solve_min_time) -- pass
+/// empty slices for a track with no DRS data. Returns (velocity profile, lateral offset
+/// profile, lap time, coarse ds).
 pub fn solve_racing_line(
     curvature_full: &[f64],
     full_ds: f64,
@@ -889,12 +933,22 @@ pub fn solve_racing_line(
     bound_s: &[f64],
     n_left_full: &[f64],
     n_right_full: &[f64],
+    drs_s: &[f64],
+    drs_open: &[bool],
 ) -> (Vec<f64>, Vec<f64>, f64, f64) {
     let (curvature, ds) = coarsen(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
     let target_s: Vec<f64> = (0..n).map(|i| i as f64 * ds).collect();
     let (n_left, n_right) = resample_bounds(bound_s, n_left_full, n_right_full, &target_s);
+    let c_d: Vec<f64> = if drs_s.is_empty() {
+        vec![params.c_d; n]
+    } else {
+        resample_drs(drs_s, drs_open, &target_s)
+            .iter()
+            .map(|&open| if open { params.c_d_drs } else { params.c_d })
+            .collect()
+    };
 
     // Same warm start as solve_min_time -- n=0, xi=0, kappa=kappa_ref is the exact
     // fixed-line problem, so the racing-line solver starts from a known-feasible point.
@@ -903,7 +957,7 @@ pub fn solve_racing_line(
     let v_init = forward_pass(&curvature, &v_back, params, ds);
 
     let x_min = 5.0 * 5.0;
-    let x_max = top_speed(params).powi(2);
+    let x_max = top_speed_drs(params).powi(2);
     let initial_x: Vec<f64> = v_init.iter().map(|v| v.powi(2).clamp(x_min, x_max)).collect();
     let initial_u: Vec<f64> = (0..n)
         .map(|i| {
@@ -924,8 +978,10 @@ pub fn solve_racing_line(
             mu_lon: params.mu_lon,
             c_l: params.c_l,
             c_d: params.c_d,
+            c_d_drs: params.c_d_drs,
             p_engine: params.p_engine,
         },
+        c_d,
         ds,
         n,
         x_min,

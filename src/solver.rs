@@ -9,7 +9,8 @@ pub struct CarParams {
     pub mu_lat: f64,     // lateral friction coefficient
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
     pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
-    pub c_d: f64,        // drag coefficient per unit mass (m⁻¹)
+    pub c_d: f64,        // drag coefficient per unit mass (m⁻¹), DRS closed
+    pub c_d_drs: f64,    // drag coefficient per unit mass (m⁻¹), DRS open (lower than c_d)
     pub p_engine: f64,   // engine power
 }
 
@@ -18,6 +19,13 @@ pub struct CarParams {
 // (a_available = P/v - c_d*v² = 0), rather than read off a real lap's telemetry.
 pub fn top_speed(params: &CarParams) -> f64 {
     (params.p_engine / params.c_d).cbrt()
+}
+
+// Top speed with DRS open (lower drag, so higher than top_speed above) -- used to size the
+// optimal.rs solvers' velocity upper bound so a DRS zone's real speed potential isn't
+// clipped by a bound sized off the DRS-closed drag alone.
+pub fn top_speed_drs(params: &CarParams) -> f64 {
+    (params.p_engine / params.c_d_drs).cbrt()
 }
 
 
