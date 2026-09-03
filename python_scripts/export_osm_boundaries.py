@@ -60,18 +60,23 @@ surface. Real approximations in this pipeline, in order:
      yasmarina:   --jump-threshold 13 --outlier-threshold 8 --hysteresis-high 13 --hysteresis-low 8
    Both validated via racing-line mode (src/optimal.rs) converging with the expected
    negative-or-near-zero delta against the fixed-line lap time.
-6. Singapore has a known FOURTH, still-unfixed failure mode, structurally different from
-   despike_offset's target: at several points the boundary's effective WIDTH itself jumps
-   abruptly (e.g. n_left moves ~12m while n_right barely moves, over one ~25m solver grid
-   step) -- most likely a lane-count tag change between adjacent OSM ways, not a
-   nearest-point mismatch. center_offset deviation at these points is mild enough (under
-   10m) that no despike_offset threshold flags it, and wouldn't be the right tool anyway
-   since the problem is the WIDTH channel's rate of change, not either boundary's distance
-   from the track median. racing-line mode still reports infeasible on Singapore -- the
-   boundary interval shifts faster than the solver's steering-rate limit (xi_bound) can
-   track, regardless of whether the underlying OSM data is "correct." A fix would need a
-   slew-rate limiter on n_left(s)/n_right(s) directly (not despike_offset's magnitude-based
-   detection). Left unresolved rather than forcing a partial fix into general code.
+6. Singapore remains unresolved, and it's NOT a despike_offset problem. Initial suspicion
+   (an OSM lane-tag glitch making the boundary WIDTH itself jump abruptly) didn't survive
+   closer inspection: at s~3924 center_offset jumps from -5.5 to +8.3 over 7.5m of raw
+   track distance, then holds around +8 and decays smoothly over the next ~170m -- the
+   opposite of a nearest-point mismatch's signature (which snaps in *and* back out sharply,
+   like Suzuka's crossover). That shape means it's real track geometry, not bad OSM data,
+   so no despike threshold -- global or per-track -- should touch it; doing so would
+   silently interpolate away a genuine corner. Confirmed this is a model-fit problem, not a
+   data or grid-resolution one: re-running racing-line mode at a finer 10m solver grid
+   (instead of the usual 25m) still doesn't produce a trustworthy solve -- Ipopt reports
+   "SolveSucceeded" but with the racing line coming out *slower* than the fixed-line lap
+   time (delta +54s), which is impossible since n=0 is always a feasible point of the same
+   problem (see main.rs's built-in check) -- so the solver is landing on a bad local point,
+   not actually solving it, at either grid spacing. The real corner's offset changes faster
+   than the solver's steering-rate assumption (xi_bound / the small-angle approximation
+   optimal.rs's formulation relies on) can represent. Left as a known limitation alongside
+   Bahrain/Catalunya/Sochi/Mexico rather than pursued further.
 
 Usage:
   python export_osm_boundaries.py --track singapore --relation-name "Marina Bay"
