@@ -319,3 +319,100 @@ Error-vs-reference is still large (13–32% for two-pass, 8–21% for optimal) n
 ## Why not model the energy budget now
 
 Raised and deliberately deferred: the MGU-K's 4 MJ/lap budget isn't a pointwise constraint like everything else in this model — how much boost is available at a given point depends on how much has already been spent everywhere earlier in the lap, and *where* to spend a fixed budget for maximum benefit is itself an optimization problem, not a physics inequality. It's the same class of problem as the optimal-control work just done, not a separate one: modeling it properly means adding an energy state to the collocation formulation above (a running "MJ spent so far" variable threaded through the solve) rather than a standalone heuristic, which would just be trading one hand-tuned rule for a smaller one. Natural next extension of `optimal.rs`, not a new solver.
+
+---
+
+---
+
+# V6 — A Free Racing Line, Real Track Boundaries, and Closing the Aero Gap
+
+## From a fixed line to a free racing line
+
+V5's `MinTimeProblem` pins the car to the FastF1 driven centerline — only speed is free, lateral acceleration is whatever `a_lat = x·κ_ref` the chosen speed implies. Real drivers use track width to straighten corners (wide entry → apex at the inside → wide exit), raising the effective corner radius and letting them carry more speed — that's the actual "racing line," and it was entirely absent from the model. This was the original motivation for pulling in real track-width data at all.
+
+Three formulations were considered for how a free lateral offset `n(s)` should feed into path curvature:
+- **Zeroth-order** (`κ_path ≈ κ_ref/(1−n·κ_ref)`, ignoring how `n` *changes*): rejected — misses the entry-apex-exit S-shape that's the actual source of a racing line's speed gain, which comes from how `n` changes across a corner, not just being offset at a point.
+- **Full second-order Frenet formula** (needs `n''`, a 3-point stencil): rejected — breaks the 2-point trapezoidal coupling the whole `optimal.rs` module is built around.
+- **Heading-based curvilinear formulation** (chosen): adds heading angle `ξ(s)` as a state and makes path curvature `κ(s)` itself a free control, replacing the fixed `κ_ref` array `MinTimeProblem` uses directly. This is the standard formulation in minimum-time lap-sim literature (Perantoni & Limebeer). It avoids `n''` entirely — `ξ` absorbs that role — while keeping the same 2-point-per-segment coupling pattern.
+
+With `h(s) = 1 − n(s)·κ_ref(s)` (path-length stretch factor) and the small-angle approximation `tan ξ ≈ ξ`, `cos ξ ≈ 1` (valid for realistic racing-line heading deviations; `ξ` gets a loose ±0.3 rad bound as a numerical safety rail, not a physical limit):
+
+```
+dn/ds = h·ξ
+dξ/ds = κ·h − κ_ref
+dt/ds = h/v                         (replaces MinTimeProblem's implicit 1/v)
+a_lat = v²·κ = x·κ                  (κ now free, was the fixed curvature array)
+```
+
+`RacingLineProblem` extends `MinTimeProblem`'s `[x(n), u(n)]` to `[x(n), u(n), n(n), ξ(n), κ(n)]` (5n variables) and `[x-defect, ellipse, power]` to `[x-defect, n-defect, ξ-defect, ellipse, power]` (5n constraints), with `n` bounded by track width and everything warm-started from `n=0, ξ=0, κ=κ_ref` — which exactly reproduces `MinTimeProblem`, so the solver always starts from a known-feasible point. `n=0` being a feasible point of the more general problem gives a free, built-in correctness check for every run: racing-line lap time must be ≤ the fixed-line optimal time, since the fixed line is a special case of the more general one.
+
+**A numerical artifact, caught by that same check.** The first working version came out *faster* than the fixed-line baseline by ~1.4 s with track width pinned to ~0 — impossible, since `n=0` forces `κ=κ_ref` exactly in the continuous problem. Root cause: the `ξ`/`κ` chain has an exact null-space direction — an alternating `ξ_i=+A, ξ_{i+1}=−A` pattern has a trapezoidal segment-average of exactly zero regardless of `A`, satisfying the `n`-defect equation for free at any amplitude while still letting `κ` deviate from `κ_ref` favorably in the ellipse constraint. Fixed with a regularization term penalizing the *point-to-point difference* `Σ(ξ_i−ξ_{i+1})²` (not raw magnitude — an earlier attempt at that required a weight large enough to also crush genuine racing-line curvature, which produced multi-thousand-second "lap times"). `κ` needed its own, separately-calibrated regularization weight for the same checkerboard mode one level down, since it has more direct leverage on the ellipse constraint than `ξ` does. Both weights were calibrated against a regression check — pinning `n_left`/`n_right` to ~0 and confirming the racing-line solver reproduces `MinTimeProblem`'s lap time to within ordinary discretization error (~0.5 s at 25 m spacing, ~0.1 s at 10 m).
+
+## Real track boundaries from OpenStreetMap
+
+Track width needs a real source, and the obvious first guess — the 2nd–98th percentile spread of where drivers actually drove across one qualifying session — measures driver-line convergence, not physical track width (professional drivers converge on nearly identical lines lap after lap; checked on Singapore, this gave an average "width" of 12.5 cm). Replaced with OpenStreetMap's road geometry, via `python_scripts/export_osm_boundaries.py`, which represents the actual paved surface: a `type=circuit` relation's constituent ways (preferred, carries `lanes` tags for a per-point width estimate) or a `highway=raceway` bbox query (fallback of last resort for a circuit with no relation — no width tags, one constant fallback width, and materially riskier since a permanent circuit's grounds can contain unrelated raceways sharing the same tagging). OSM's lat/lon geometry is registered against FastF1's local X/Y frame via ICP (brute-force initial rotation search, then iterated closest-point + Kabsch rigid-transform refinement), with mean registration residual as the primary data-quality signal (~5–10 m is a genuine racing-line-vs-road-centerline gap; north of ~15–20 m is a warning sign of a bad relation match, not real geometry).
+
+**Two shapes of nearest-point matching error, needing two different detectors** (`despike_offset`): the raw pipeline finds, for each reference-line point, the nearest point on the registered OSM road centerline — a pure 2D spatial search, blind to track topology, which fails in two ways:
+1. **Sharp snap-to-wrong-lobe** — a run of samples jumps onto a stable but wrong offset plateau, bounded by sharp single-sample jumps in and out. Suzuka's crossover (the track physically passes over/under itself) and Shanghai's tightly nested corners both produce this. Caught by detecting plateaus via their boundary jumps, then keeping only the ones whose mean is actually far from the track-wide median — magnitude alone missed plateaus straddling any single cutoff (Suzuka: one at −16 m, the next at +15 m).
+2. **Gradual multi-way drift** — found on Singapore, where the nearest match wanders through a nearby paddock/pit-access road, climbing smoothly to an 88 m offset over ~180 m and back, with no single jump large enough to trip the first detector. Caught by hysteresis thresholding (as in Canny edge detection): a point beyond a high threshold seeds a bad region, which floods outward through neighbors while they stay above a looser low threshold — bounding the region at where the drift actually returns to baseline rather than at a fixed magnitude.
+
+Both masks are OR'd together and the flagged points linearly interpolated from surrounding good samples. Thresholds were tuned into the gap between two observed clusters: Baku's genuine narrow "castle section" chicane (real jumps up to ~13.5 m) and Monaco's genuine registration noise (up to ~16.4 m deviation, no sharp jumps) on one side, Suzuka/Shanghai's wrong-lobe snaps (16–95 m) and Singapore's drift (14–88 m) on the other. That global compromise wasn't tight enough everywhere, though: Red Bull Ring and Yas Marina both had real leftover artifacts sitting *under* the shared defaults but clearly separated from each track's own deviation percentiles — fixed with CLI-exposed per-track threshold overrides instead of one more global compromise attempt.
+
+**Singapore's remaining infeasibility — a model limit, not a data bug.** After the drift fix, Singapore still reported infeasible. First hypothesis — a fourth failure mode, an OSM lane-tag width glitch — didn't survive inspection of the raw samples: the flagged jump (`center_offset` −5.5→+8.3 over 7.5 m) *holds* and decays smoothly over the next ~170 m, the opposite of a nearest-point mismatch's signature (which snaps in and back out sharply). That's a real corner, not bad data — confirmed by testing a finer 10 m solver grid instead of touching the data at all, which still didn't produce a trustworthy solve (Ipopt reported success with the racing line *slower* than the fixed line, impossible since `n=0` is always feasible). The real corner's offset changes faster than the solver's steering-rate assumption (`ξ_bound`, or the small-angle approximation itself) can represent — left as a known limitation rather than despiking away genuine track geometry to force a fix.
+
+## Extending to the full 2018 calendar
+
+Of the 21-race 2018 calendar, **15 tracks now run end-to-end** through the racing-line solver (verified both numerically — `SolveSucceeded` with lap time ≤ the fixed-line baseline — and visually against known track shapes): Monaco, Baku, Suzuka, Shanghai, Monza, Spa, Montreal, Paul Ricard, Silverstone, Hockenheim, Hungaroring, COTA, Interlagos, Red Bull Ring, Yas Marina.
+
+**6 known limitations, none pursued further:**
+
+| Track(s)    | Issue | 
+|---|---|
+| Bahrain, Catalunya | OSM relation bundles multiple real track layouts (e.g. car vs. motorcycle circuit); registration residual 35–63 m, unusable |
+| Sochi, Mexico | No OSM relation found at all — an OSM data-availability gap, not a fixable code issue |
+| Singapore | Real corner geometry exceeds the solver's steering-rate/small-angle model limit (see above) |
+
+## Validating against real pole times: a systematic gap
+
+With the racing-line solver working across 15 tracks, the natural check is against something the model was never fit to: each track's real 2018 qualifying pole time (fetched live via FastF1, not hardcoded). Result: a **systematic +16.3% mean gap** (stdev 3.7%) across all 15 tracks — and not noise. The gap tracked how corner-heavy each track is: straight-line-dominated tracks (Baku, Monza) were closest (~+10%); fast-flowing, corner-heavy tracks (Silverstone, COTA, Hockenheim, Suzuka, Yas Marina) were worst (+19–22%). That pattern points at underestimated *cornering* grip, not power or drag.
+
+**`μ_lat` alone doesn't close it.** Pushing `μ_lat` from 1.6 to 1.8 (the top of its published "tire-only" range) closed only part of the gap, unevenly — e.g. Hungaroring +15.9%→+10.5%, COTA +22.0%→+16.7% — confirming `μ_lat` matters but isn't the dominant lever.
+
+**DRS closes a small, real slice.** Modeled as a per-point drag reduction (`c_d_drs`, 12% lower than `c_d`, applied only where `python_scripts/export_track.py`'s exported `DRS` telemetry channel shows the flap open on the same lap — DRS never affects cornering, since it closes before the braking zone). This only touches the power-ceiling constraint's first derivatives in `optimal.rs` (no Hessian changes needed) and required sizing the solver's velocity upper bound off the DRS-*open* top speed so a zone's real speed potential isn't clipped. Measured gain: 0.05–0.34 s/lap (mean 0.24 s) — moved the mean gap from +16.3% to +16.0%, exactly the "a small slice, not the bulk" estimate made before implementing it.
+
+**The 3-tier downforce classification was the real problem.** `python_scripts/derive_downforce.py` derives `c_l` and `c_d` per track from that track's own real telemetry instead of guessing which of 3 buckets a circuit belongs to: `c_d` from the real observed top speed (power/drag balance, assuming DRS open there), `c_l` from real apex lateral acceleration at "quasi-steady-state cornering" points — every point where `|dv/ds|` falls in the bottom quartile for that lap, not just single local-speed-minimum points (an earlier attempt using only exact minima starved several tracks of samples entirely, including two with zero). Both signals are independent of lap time itself, so validating the result against real lap times isn't circular curve-fitting.
+
+| track | solver | real pole | gap |
+|---|---|---|---|
+| baku | 93.761 | 101.498 | −7.6% |
+| redbullring | 59.855 | 63.130 | −5.2% |
+| suzuka | 85.685 | 87.760 | −2.4% |
+| hungaroring | 75.856 | 76.666 | −1.1% |
+| cota | 91.920 | 92.237 | −0.3% |
+| shanghai | 90.997 | 91.095 | −0.1% |
+| hockenheim | 71.207 | 71.212 | −0.0% |
+| spa | 102.258 | 101.501 | +0.7% |
+| paulricard | 91.503 | 90.029 | +1.6% |
+| monza | 80.814 | 79.119 | +2.1% |
+| monaco | 72.907 | 70.810 | +3.0% |
+| yasmarina | 98.761 | 94.794 | +4.2% |
+| montreal | 73.979 | 70.764 | +4.5% |
+| silverstone | 91.408 | 85.892 | +6.4% |
+| interlagos | 72.272 | 67.281 | +7.4% |
+
+**Mean gap: +0.9%, stdev 4.1%** — down from +16.3%/3.7%, i.e. the derivation closed the gap broadly rather than just relocating it (stdev roughly unchanged). A few tracks (Baku, Red Bull Ring) come out slightly *faster* than the real pole, which is philosophically sane for a theoretical optimum being compared against one human driver's single best lap, not necessarily a sign of over-fitting. Reproducible via `python_scripts/validate_pole_times.py`, committed as a permanent check rather than left as a one-off.
+
+## Why `μ_lat` still isn't derived per track
+
+The natural next question: if `c_l` can be derived per track from apex data, why not `μ_lat` too? At a single apex point, `a_lat = μ_lat·(G + c_l·v²)` is one equation in two unknowns — `μ_lat` has to be fixed to solve for `c_l` at all. But that equation *is* linear in `v²` (intercept `μ_lat·G`, slope `μ_lat·c_l`), so in principle one regression of every qualifying apex's `a_lat` against `v²` should identify both jointly. Tried it, rejected it: widening the apex speed floor to give the regression a useful `v²` range let through points that aren't real corners at all — a flat-out straight also has `|dv/ds|≈0`, so a tiny residual curvature (GPS noise, a gentle kink) at very high speed passed the curvature filter (a "274 km/h apex" at Yas Marina). Those sit far out in `v²`, giving them outsized leverage on an ordinary-least-squares fit and wildly distorting the intercept extrapolated back to `v=0` — derived `μ_lat` came out 2.1–6.3 across tracks (vs. the published 1.4–1.8) with R² as low as 0.04 on most tracks, and two tracks failed outright (a non-physical negative slope on one, too few points on another). The existing median-based `c_l` estimate tolerates the same stray points fine — a median just ignores a few outliers, exactly where a regression's intercept is most exposed to them. `μ_lat` stays fixed at 1.6.
+
+## Solver consolidation
+
+By this point three distinct algorithms existed and overlapped: the original two-pass bang-bang sweep (V1–V3), `MinTimeProblem`'s fixed-line optimal control (V5), and `RacingLineProblem`'s free-lateral-offset optimal control (this stage) — the latter a strict superset of the one before it (pinning `n≈0` reproduces `MinTimeProblem`'s lap time almost exactly, per the regression check above). The two-pass sweep added nothing `MinTimeProblem` didn't already do better, so it was dropped entirely from `main.rs`'s CLI — `racingline` is now the default mode, with `optimal` (`MinTimeProblem`) kept only as the fallback for a track with no boundary data and as `racingline`'s own built-in correctness-check baseline. `backward_pass`/`forward_pass` (the two-pass sweep's core) stay in `solver.rs` regardless — both Ipopt problems still use them internally to build a warm-start guess.
+
+## Remaining open items
+
+- The ~1% residual mean gap and ~4% stdev are consistent with ordinary per-lap noise (a single real driver's one best lap vs. a theoretical per-track optimum) rather than a further systematic model error to chase.
+- No tire degradation, fuel-load burn-off, or track-evolution modeling — reasonable for a single qualifying lap (fresh tires, near-empty fuel), same idealization flagged since V1.
+- No ERS energy-budget state (V5's deferred item) — still open, same reasoning as before.
+- The 6 tracks outside the working set (above) are accepted limitations, not active problems.
