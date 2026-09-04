@@ -12,16 +12,8 @@ fn main() {
     // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
     let track = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
-    // "racingline" (default, and the primary solver) runs the minimum-time collocation
-    // solver in optimal.rs with a free lateral offset bounded by track width (see
-    // solve_racing_line), requiring data/<slug>_track_boundaries.csv to already exist
-    // (python_scripts/export_osm_boundaries.py). "optimal" runs the same collocation
-    // solver pinned to the fixed FastF1 driven line (see solve_min_time) -- kept as the
-    // fallback for a track with no boundary data, and as racingline's own correctness-check
-    // baseline (n=0 is a feasible point of the racing-line problem, so its lap time must be
-    // <= the fixed-line one; see the "racingline" branch below). The original two-pass
-    // greedy sweep (a bang-bang always-brake/accelerate-at-the-ellipse-edge heuristic) has
-    // been removed -- solve_min_time's real optimization strictly supersedes it.
+    // "racingline" (default, primary solver) or "optimal" (fixed-line fallback and
+    // racingline's correctness baseline) -- see README.md for the full CLI reference.
     let mode = env::args().nth(2).unwrap_or_else(|| "racingline".to_string());
     // Only used in "optimal"/"racingline" modes: target collocation-point spacing in meters.
     let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(25.0);
@@ -46,26 +38,14 @@ fn main() {
     println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
-    // mu_lat/mu_lon/p_engine are tire and powertrain properties, not wing-angle choices, so
-    // they stay fixed across tracks. mass 734 kg (2018 min car+driver weight, near-empty
-    // quali fuel); mu_lat/mu_lon from published tire-only (aero-excluded) friction estimates
-    // (1.4-1.8 / 1.5-1.6); p_engine = (625 kW ICE + 120 kW MGU-K peak) / 734 kg, no ERS
-    // energy budget modeled (known idealization: real cars can't sustain this continuously,
-    // only ~33s/lap of MGU-K boost). Braking capacity is derived purely from the friction
-    // ellipse (mu_lon*g_eff), not a separate flat floor -- an earlier a_brake*0.3 floor was
-    // dropped once the minimum-time solver (optimal.rs) showed it let the two-pass sweep
-    // brake harder than the pure ellipse allows, particularly at corner entry where lateral
-    // load is highest; it was a two-pass crutch, not real physics, so removed from both
-    // solvers rather than kept as an inconsistency between them.
-    //
-    // c_l/c_d are wing-level choices real teams change per circuit. Preferred source: real
-    // per-track values from python_scripts/derive_downforce.py, which derives both straight
-    // from that track's own telemetry (apex lateral acceleration for c_l, top speed for
-    // c_d) rather than guessing which tier a circuit belongs to -- validated to drop the
-    // racing-line solver's mean gap to real 2018 pole times from +16.3% to +0.9% across all
-    // 15 working tracks (see that script's docstring). Falls back to a coarse 3-tier
-    // classification below for a track with no derived data/<slug>_aero_params.csv (e.g.
-    // one outside the 15-track working set, or a fresh track before running that script).
+    // mu_lat/mu_lon/p_engine are tire and powertrain properties (fixed across tracks, not
+    // wing-angle choices): mass 734 kg (2018 min car+driver, near-empty quali fuel),
+    // mu_lat/mu_lon from published tire-only friction estimates, p_engine from 625 kW ICE +
+    // 120 kW MGU-K peak (no ERS energy budget modeled). Braking is derived purely from the
+    // friction ellipse, no separate flat floor -- see DISCUSSION.md for why that floor was
+    // dropped. c_l/c_d are wing-level, per-circuit choices: prefer real per-track values
+    // from python_scripts/derive_downforce.py (see its docstring), falling back to the
+    // coarse 3-tier classification below when data/<slug>_aero_params.csv doesn't exist yet.
     const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
     const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);  // Cd=0.85, Cl=2.47
     const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
@@ -78,12 +58,8 @@ fn main() {
     const DRS_DRAG_REDUCTION: f64 = 0.88;
 
     // 2018 calendar (21 rounds), tiered by circuit character: tight/technical -> high,
-    // long-straight power circuits -> low, everything else -> medium. Monaco/Hungaroring/
-    // Singapore/Monza/Spa/Baku are well-sourced as tier extremes; most "medium" placements
-    // are standard paddock classification rather than individually re-derived. Mexico is a
-    // special case folded into "medium" as an approximation: real air density at 2240m
-    // altitude is ~77% of sea level, which this model doesn't account for separately from
-    // the wing-level choice captured here.
+    // long-straight power circuits -> low, everything else -> medium (see DISCUSSION.md
+    // for sourcing and known approximations, e.g. Mexico's altitude effect).
     let (c_l, c_d) = match track.as_str() {
         "monaco" | "hungaroring" | "singapore" | "catalunya" => HIGH_DOWNFORCE,
         "baku" | "montreal" | "redbullring" | "spa" | "monza" => LOW_DOWNFORCE,

@@ -1,45 +1,29 @@
-// Minimum-time velocity profile via direct collocation, solved with Ipopt.
+// Minimum-time velocity profile via direct collocation, solved with Ipopt. See
+// results/DISCUSSION.md for the full rationale (vs. the two-pass sweep, and why analytic
+// Hessians replaced Ipopt's L-BFGS approximation).
 //
-// Replaces the two-pass sweep's bang-bang assumption (always brake/accelerate at the
-// friction ellipse's edge) with a real optimization: the solver is free to choose any
-// point inside the ellipse at every point along the lap, so genuine trail braking
-// (blending lateral and longitudinal grip through a corner) can emerge on its own
-// instead of being hard-coded. The racing line (X/Y path) is still fixed -- lateral
-// acceleration is pinned by whatever v the solver picks (a_lat = v^2 * kappa), not a
-// free control -- so the only real decision variable is longitudinal acceleration.
-//
-// State/control: x(s) = v(s)^2 (avoids a 1/v singularity in the dynamics and makes them
-// affine in the control), u(s) = a_lon(s), signed: positive = traction, negative = brake.
+// State/control: x(s) = v(s)^2 (avoids a 1/v singularity, affine dynamics), u(s) = a_lon(s),
+// signed: positive = traction, negative = brake.
 //   dx/ds = 2u
-// discretized with trapezoidal collocation over n points around a closed (periodic) lap:
+// trapezoidal collocation over n points around a closed (periodic) lap:
 //   x[i+1] - x[i] - (u[i] + u[i+1])*ds = 0   (indices wrap mod n)
 //
-// Path constraints per point: friction ellipse (replaces the old a_brake floor entirely --
-// that floor only existed to patch the two-pass sweep's inability to blend lat/lon grip,
-// which is exactly the limitation this solver removes) and the traction-power ceiling:
+// Path constraints per point: friction ellipse and traction-power ceiling:
 //   (x*kappa)^2 / (mu_lat*g_eff)^2 + u^2 / (mu_lon*g_eff)^2 <= 1,   g_eff = G + c_l*x
 //   u <= p_engine/sqrt(x) - c_d*x
 //
 // Objective: minimize sum(ds / v[i]), the same lap-time quantity solver::lap_time measures.
 //
-// First working version deliberately ran on a coarse grid (~25 m spacing) with Ipopt's
-// limited-memory (L-BFGS) Hessian approximation instead of analytic second derivatives.
-// That worked up to ~500 variables but stalled well short of full 1 m resolution (~10000
-// variables) -- L-BFGS's fixed-size memory window captures proportionally less curvature
-// information as problem size grows, and iteration counts were already scaling much faster
-// than linearly (131 -> 700 -> 1713 iterations for n = 202 -> 336 -> 504) before it broke
-// down entirely. Replaced with the analytic Hessian below to reach full resolution.
-//
-// The dynamics defect is linear in (x, u), so it contributes nothing to the Hessian. Only
-// the objective and the ellipse/power constraints need second derivatives. With
-// g = G + c_l*x, K = kappa, L = mu_lat, M = mu_lon:
+// Analytic Hessian: the dynamics defect is linear in (x, u), contributing nothing. Only the
+// objective and ellipse/power constraints need second derivatives. With g = G + c_l*x,
+// K = kappa, L = mu_lat, M = mu_lon:
 //   d2f/dx2   = 0.75*ds*x^-2.5                                        (objective, diagonal)
 //   d2E/dx2   = -6*c_l*(K^2*x*G/L^2 - c_l*u^2/M^2)/g^4 + 2*K^2*G/(L^2*g^3)
 //   d2E/du2   = 2/(M^2*g^2)
 //   d2E/dxdu  = -4*c_l*u/(M^2*g^3)
 //   d2P/dx2   = -0.75*p_engine*x^-2.5
-// (d2P/du2 = d2P/dxdu = 0 -- power is linear in u.) So the Hessian sparsity is unchanged
-// from before: 3 entries per point (x diagonal, u diagonal, x-u cross term).
+// (d2P/du2 = d2P/dxdu = 0 -- power is linear in u.) Sparsity: 3 entries per point (x
+// diagonal, u diagonal, x-u cross term).
 
 use ipopt::*;
 
@@ -49,45 +33,20 @@ const G: f64 = 9.81;
 
 // Regularization weight on xi's point-to-point differences in RacingLineProblem's
 // objective (eps*sum((xi_i-xi_{i+1})^2)). Without it, the xi/kappa chain has an exact
-// null-space direction -- an alternating xi_i=+A, xi_{i+1}=-A pattern has a trapezoidal
-// segment-average of exactly zero regardless of A or ds, so it satisfies the n-defect
-// equation for free at any amplitude, while still letting kappa deviate from kappa_ref
-// through the xi-defect equation and shape the ellipse constraint favorably. Confirmed
-// empirically: with track width pinned to ~0 (forcing n=0), the solver found a lap time
-// ~1.4s faster than the fixed-line solver by riding exactly this mode -- a numerical
-// artifact, not real physics, since n=0 forces kappa=kappa_ref exactly in the continuous
-// problem.
-//
-// A first attempt penalized raw magnitude (eps*xi_i^2) instead of the difference above.
-// That requires a weight large enough to also crush genuine racing-line behavior --
-// confirmed empirically on real (non-degenerate) track width, where it produced multi-
-// thousand-second "lap times" because a real racing line's legitimate curvature deviation
-// from kappa_ref got penalized just as harshly as the spurious checkerboard noise, since
-// both can have similar *magnitude*. Penalizing the point-to-point *difference* instead
-// targets what actually makes the checkerboard mode exploitable (period-2 alternation
-// means a maximal difference of 2A between neighbors) while barely touching a genuine
-// racing line's curvature, which changes gradually from point to point.
-//
-// Calibrated against the pinned-n regression check (data/<slug>_track_boundaries.csv with
-// n_left/n_right forced to ~0, so the racing-line solver should reproduce MinTimeProblem's
-// lap time exactly). At this weight the remaining gap is ~0.5s at 25m spacing and shrinks
-// to ~0.1s at 10m spacing -- confirmed as ordinary trapezoidal discretization error between
-// the two problems' slightly different objective/dynamics forms, not a residual exploit:
-// raising either weight by 100x past this point changes the gap and the xi/kappa deviation
-// magnitudes by less than 10%, the signature of a saturated (not still-being-ridden)
-// null-space direction. See KAPPA_REG_WEIGHT below for why it needs its own weight rather
-// than sharing this one.
+// null-space direction -- an alternating xi_i=+A, xi_{i+1}=-A pattern satisfies the
+// n-defect equation for free at any amplitude while letting kappa shape the ellipse
+// constraint favorably, a numerical artifact rather than real physics (see
+// DISCUSSION.md's "numerical artifact" section for how this was caught and why the
+// weight penalizes the difference rather than raw xi magnitude). Calibrated against the
+// pinned-n regression check (track width forced to ~0 m, racing line must reproduce
+// MinTimeProblem's lap time); the gap at this weight is ordinary discretization error,
+// not a residual exploit.
 const XI_REG_WEIGHT: f64 = 2000.0;
 
-// Same problem, one level down: with xi's differences regularized smooth, kappa can still
-// checkerboard around kappa_ref (kappa_i-kappa_ref_i=+B, kappa_{i+1}-kappa_ref_{i+1}=-B
-// still averages to zero in the xi-defect) since kappa never appears in the objective
-// either. Same point-to-point-difference shape as XI_REG_WEIGHT; needs its own weight
-// (rather than reusing XI_REG_WEIGHT) because kappa has more leverage on the ellipse
-// constraint (a_lat = x*kappa directly) than xi does, so the same weight suppresses it far
-// less per unit -- confirmed empirically: tightening the n-pin in the regression check by
-// 100x shrank xi's residual deviation by ~17x but kappa's by only ~3x. Calibrated the same
-// way as XI_REG_WEIGHT.
+// Same null-space problem one level down (kappa can still checkerboard around kappa_ref
+// once xi alone is regularized). Needs its own weight, not XI_REG_WEIGHT, because kappa
+// has more direct leverage on the ellipse constraint (a_lat = x*kappa) than xi does.
+// Calibrated the same way as XI_REG_WEIGHT.
 const KAPPA_REG_WEIGHT: f64 = 2000.0;
 
 /// Sample stride for coarsening a full-resolution (ds=full_ds) array down to roughly
@@ -436,28 +395,11 @@ pub fn solve_min_time(
 }
 
 // --- Racing-line optimization: free lateral offset on top of the fixed-line solver above ---
-//
-// MinTimeProblem pins the car to the FastF1 driven centerline; only speed is free. Real
-// drivers use track width to straighten corners (wide entry -> apex at the inside -> wide
-// exit), which raises the effective corner radius and lets them carry more speed -- that's
-// the actual "racing line", and RacingLineProblem below adds it as a genuine decision.
-//
-// State/control adds three arrays to MinTimeProblem's (x, u): lateral offset n(s) (bounded
-// by track width from data/<slug>_track_boundaries.csv), heading ξ(s) relative to the
-// track tangent, and path curvature κ(s) -- which becomes a free control here, in place of
-// the fixed curvature array MinTimeProblem uses directly in its ellipse constraint.
-//
-// This is the standard heading-based curvilinear formulation from minimum-time lap-sim
-// literature (e.g. Perantoni & Limebeer). It was chosen over two alternatives:
-//   - kappa_path = kappa_ref/(1-n*kappa_ref) with n alone: rejected, since it can't
-//     represent the entry-apex-exit S-shape that's the actual source of a racing line's
-//     speed gain -- the benefit comes from how n *changes* across a corner, not just being
-//     offset at a point.
-//   - the full second-order Frenet curvature formula (needs n''): rejected, since it needs
-//     a 3-point stencil and would break the 2-point trapezoidal coupling this whole module
-//     is built around.
-// The heading state ξ avoids n'' entirely while keeping that same 2-point-per-segment
-// structure -- just with three more state/control arrays per point instead of one.
+// Adds lateral offset n(s) (bounded by track width, data/<slug>_track_boundaries.csv),
+// heading xi(s) relative to the track tangent, and path curvature kappa(s) as a free
+// control (replacing MinTimeProblem's fixed curvature array). Heading-based curvilinear
+// formulation, standard in minimum-time lap-sim literature (Perantoni & Limebeer) -- see
+// DISCUSSION.md for why this was chosen over the two rejected alternatives.
 //
 // With h(s) = 1 - n(s)*kappa_ref(s) (the path-length stretch factor) and the small-angle
 // approximation tan(xi)=xi, cos(xi)=1 (valid for the realistic heading deviations a racing

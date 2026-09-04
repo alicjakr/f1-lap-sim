@@ -1,74 +1,32 @@
 """
 Derive per-track (c_l, c_d) aero coefficients from a track's own real FastF1 telemetry,
 instead of guessing which of three fixed tiers (main.rs's HIGH/MED/LOW_DOWNFORCE) a circuit
-belongs to.
+belongs to. See results/DISCUSSION.md for why (the 3-tier system's validation gap) and the
+full validation history, including the rejected joint mu_lat/c_l regression.
 
-Why: validating the racing-line solver's lap times against real 2018 pole times (with the
-3-tier system) showed a systematic +16.3% mean gap across all 15 working tracks, worse the
-more corner-time-dominated the track (Silverstone/COTA/Hockenheim: +21-22%; Baku/Monza,
-straight-line-dominated: +10%). Raising mu_lat toward the top of its published range closed
-only part of it uniformly -- the tiers themselves were the bigger problem.
+Two independent measurements per track, both from the same lap export_track.py already
+wrote (data/<slug>_track_geometry.csv's X/Y and data/<slug>_reference_lap.csv's Speed share
+the same Distance axis, unlike the OSM boundary data -- no cross-axis interpolation needed):
 
-Two independent physical measurements per track, both from the SAME lap already exported by
-export_track.py (data/<slug>_track_geometry.csv's X/Y and data/<slug>_reference_lap.csv's
-Speed share the same Distance axis -- no cross-axis interpolation needed here, unlike the
-OSM boundary data):
-
-1. c_d from top speed: at the real observed top speed, power and drag balance
-   (P = c_d_drs * m * v^3, in this codebase's per-unit-mass convention), assuming DRS is open
-   there (the entire reason DRS exists is to raise top speed). v_max taken as the 99.5th
-   percentile of smoothed speed, not the raw max, to avoid one noisy telemetry sample
-   swinging a cubic relationship.
+1. c_d from top speed: power/drag balance (P = c_d_drs * m * v^3) at the 99.5th percentile
+   of smoothed speed (not the raw max, to avoid one noisy sample swinging a cubic
+   relationship), assuming DRS is open there.
 
 2. c_l from real apex lateral acceleration: the friction ellipse says a_lat = mu_lat*(G +
-   c_l*v^2) at a point of pure cornering (a_lon ~ 0). Real corners rarely hold EXACTLY zero
-   longitudinal acceleration for one instant, so instead of picking single local-minimum
-   points (an earlier attempt at this: 0-9 samples per track, several tracks got zero),
-   every point where |dv/ds| falls in the bottom 25th percentile for that lap counts as
-   "quasi-steady-state cornering" -- this captures whole apex plateaus, not one point,
-   giving dramatically more samples (2-34 per track here). Filtered to real corners only
-   (curvature >= MIN_CURVATURE) fast enough that aero downforce is a meaningful fraction of
-   total grip (>= MIN_APEX_SPEED_KMH) -- a slow hairpin is mechanical-grip-dominated and
-   would bias c_l toward noise. Takes the per-track median of the implied c_l across all
-   qualifying points.
+   c_l*v^2) at a point of pure cornering. Every point where |dv/ds| falls in the bottom 25th
+   percentile for that lap counts as "quasi-steady-state cornering" (captures whole apex
+   plateaus, not just single local-minimum points -- an earlier attempt using only exact
+   minima starved several tracks of samples). Filtered to real corners (curvature >=
+   MIN_CURVATURE) fast enough that aero is a meaningful fraction of total grip (>=
+   MIN_APEX_SPEED_KMH). Takes the per-track median of the implied c_l.
 
 X/Y and Speed are lightly smoothed (Savitzky-Golay, ~9-sample window) before differentiating
-for curvature and dv/ds -- raw telemetry noise otherwise creates spurious "corners" and
-unstable derivatives.
+for curvature and dv/ds, to avoid spurious "corners" and unstable derivatives from raw
+telemetry noise.
 
-Validated end-to-end (not just that the per-corner numbers look plausible): plugging the
-derived values into the racing-line solver dropped the mean gap to real 2018 pole times from
-+16.3% to +0.9% across all 15 tracks (stdev roughly unchanged, ~4%, so this is closing the
-gap broadly, not just moving it around) -- both c_l and c_d came from real telemetry signals
-independent of lap time itself, so this isn't circular curve-fitting to the answer.
-
-Known limitation: per-corner c_l implied values have wide spread within a single track (e.g.
-Red Bull Ring's interquartile range spanned 0.005-0.021, over 4x) even after smoothing and
-the quasi-steady-state filter -- taking the median is a reasonably robust point estimate, but
-a single constant c_l can't represent real aero load variation across corner types (a wing's
-downforce/drag characteristics aren't perfectly speed-invariant in reality). Power circuits
-with few genuine high-speed corners (Monza, Montreal) get very few qualifying samples (2-3)
--- likely reflects genuine track character rather than a detection failure, but worth a
-second look if a future track's derived value looks implausible.
-
-Why mu_lat is still fixed, not derived per track: a_lat = mu_lat*(G + c_l*v^2) is one
-equation in two unknowns at a single apex point, so mu_lat has to be fixed to solve for c_l
-at all -- but that equation IS linear in v^2 (intercept mu_lat*G, slope mu_lat*c_l), so a
-single regression of every qualifying apex's a_lat against v^2 should identify both jointly.
-Tried it -- rejected. Loosening the apex speed floor to feed the regression a wide v^2 range
-let through points that aren't real corners at all: on a flat-out straight, |dv/ds| is also
-near zero (constant top speed satisfies "quasi-steady-state" as well as a real apex does),
-so a tiny residual curvature from GPS noise or a gentle kink was enough to pass the
-MIN_CURVATURE filter at very high speed (e.g. a "274 km/h apex" at Yas Marina, curvature
-just above threshold). Those points sit far out in v^2, so ordinary least squares gives them
-huge leverage, and they wildly distorted the intercept extrapolated back to v=0 -- derived
-mu_lat came out 2.1-6.3 across tracks (vs. the published 1.4-1.8) with R^2 as low as 0.04-0.2
-on most tracks, and two tracks failed outright (Monza: too few points after the floor;
-Red Bull Ring: negative slope, i.e. downforce implied to reduce grip). The median-based c_l
-estimate above tolerates the same stray points fine -- a median just ignores a few outliers,
-where a regression's intercept is exactly the term those outliers distort most. Left as a
-fixed global mu_lat=1.6 rather than chasing a stricter apex filter that would just reintroduce
-the original too-few-samples problem this script's c_l method was built to avoid.
+mu_lat stays a fixed global constant rather than being derived per track -- tried, rejected;
+see DISCUSSION.md for why the joint regression on v^2 fails (outlier leverage from
+misclassified straight-line points).
 
 Usage:
   python derive_downforce.py --track monaco

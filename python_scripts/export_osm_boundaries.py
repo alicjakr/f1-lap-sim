@@ -1,82 +1,47 @@
 """
 Export track boundary (left/right edge) geometry from OpenStreetMap, registered against
-the FastF1-derived reference line.
+the FastF1-derived reference line. Uses OSM's road geometry (the actual paved surface)
+rather than the driven-line spread of FastF1 telemetry -- see results/DISCUSSION.md for
+why that alternative was rejected (driver-line convergence isn't track width).
 
-Why not derive width from FastF1 telemetry (the old export_boundaries.py approach)? That
-script measured the 2nd-98th percentile spread of *where F1 drivers actually drove* across
-one qualifying session. Professional drivers converge on nearly identical racing lines lap
-after lap, so that spread measures driver-line convergence, not physical track width --
-checked on Singapore, average "width" came out at 12.5 cm. Unusable.
+Pipeline, in order:
 
-This script uses OpenStreetMap's road geometry instead, which represents the actual paved
-surface. Real approximations in this pipeline, in order:
-
-1. Two ways circuits show up in OSM, with different width precision:
-   - Most circuits, including permanent ones (Singapore, Suzuka), have a `type=circuit`
-     relation listing the constituent road/raceway ways, which carry `lanes` tags -- width
-     imputed as lanes * LANE_WIDTH_M, the same imputation OSM's own wiki recommends when
-     width is untagged (no circuit in this pipeline has an explicit `width` tag at all:
-     checked, 0/100 ways for Marina Bay). Ways lacking even a `lanes` tag fall back to
-     DEFAULT_LANES. The relation's `name` tag may be in the local language (Suzuka's
-     relation 284570 is named "鈴鹿サーキット", with the English name only in `name:en`)
-     -- fetch_segments_from_relation matches against both.
-   - --bbox is a fallback of last resort for a circuit with no relation at all, querying
-     highway=raceway ways directly in a lat/lon box. This is a materially weaker
-     approximation (no lanes tags either, so every way gets one constant FALLBACK_WIDTH_M,
-     no per-point variation) *and* riskier: a permanent circuit's grounds can contain other
-     `sport=motor` raceways with no relation to exclude them -- Suzuka's bbox, for example,
-     also pulls in the separate "International South Course" and several amusement-park
-     go-kart/ride tracks (DREAM R, Petit Grand Prix, etc.) sharing the same tagging, nearly
-     doubling the apparent track length and wrecking ICP registration (96 m mean residual,
-     vs. ~8 m for a clean relation fetch). Prefer --relation-name; reach for --bbox only
-     once you've confirmed via Overpass that no relation exists for the circuit at all.
-2. Where a relation exists, its member order is not reliably sequential along the route
-   (verified on Singapore: naive member-order chaining left 12 gaps up to 1138 m). Ways are
-   instead reassembled by greedy nearest-endpoint chaining regardless of source (relation or
-   bbox), which produced a perfectly closed loop (0 m max gap) matching FastF1's known
-   circuit length almost exactly on Singapore.
-3. OSM coordinates are lat/lon; FastF1's X/Y are that session's own local positioning frame,
-   unrelated to any real-world coordinate system a priori. Registered via ICP (iterative
-   closest point: brute-force initial rotation search, then iterated closest-point matching
-   + Kabsch rigid-transform fitting) between the OSM road centerline and the FastF1 driven
-   line. No ground-truth correspondence exists to check the fit against beyond the residual
-   and a visual check -- both were done for Singapore (mean residual 8.2 m, visually a clean
-   match) before trusting this method; a residual far outside the ~5-10 m range a genuine
-   racing-line-vs-road-centerline gap would produce is a sign of a bad registration on a new
-   track, not something to average over silently.
-4. Track width is measured from the OSM road centerline, then converted to left/right
-   *offsets from our own reference line* (the FastF1 driven line, not necessarily centered
-   in the road) -- what the racing-line optimizer actually needs. n > 0 is left of the
-   driving direction, n < 0 is right; n_right[i] <= n[i] <= n_left[i].
+1. Two ways circuits show up in OSM. Most circuits have a `type=circuit` relation listing
+   constituent road/raceway ways, which carry `lanes` tags -- width imputed as
+   lanes * LANE_WIDTH_M (OSM's own recommended imputation when width is untagged), falling
+   back to DEFAULT_LANES for ways without even a `lanes` tag. fetch_segments_from_relation
+   matches the relation's `name` against both the local-language and `name:en` tags.
+   --bbox (querying highway=raceway ways in a lat/lon box) is a fallback of last resort for
+   a circuit with no relation: no lanes tags (one constant FALLBACK_WIDTH_M throughout) and
+   riskier, since a permanent circuit's grounds can contain unrelated `sport=motor` raceways
+   with nothing to exclude them by. Prefer --relation-name; reach for --bbox only once
+   you've confirmed via Overpass that no relation exists.
+2. A relation's member order isn't reliably sequential along the route, so ways are
+   reassembled by greedy nearest-endpoint chaining regardless of source (relation or bbox).
+3. OSM coordinates are lat/lon; FastF1's X/Y are that session's own local positioning
+   frame. Registered via ICP (brute-force initial rotation search, then iterated
+   closest-point matching + Kabsch rigid-transform fitting) between the OSM road centerline
+   and the FastF1 driven line. Mean registration residual is the data-quality signal to
+   check on a new track -- ~5-10 m is expected (a genuine racing-line-vs-road-centerline
+   gap); well outside that range signals a bad relation match, not something to average
+   over silently.
+4. Track width is converted to left/right *offsets from our own reference line* (the
+   FastF1 driven line, not necessarily centered in the road) -- what the racing-line
+   optimizer needs. n > 0 is left of the driving direction, n < 0 is right;
+   n_right[i] <= n[i] <= n_left[i].
 5. despike_offset() cleans up two shapes of nearest-point matching error (see its own
-   docstring), calibrated against a cross-track compromise (jump/outlier/hysteresis
-   defaults) that has to hold simultaneously for every track's genuine registration noise.
-   That compromise isn't tight enough for every track: Red Bull Ring and Yas Marina both
-   had real leftover artifacts sitting *under* the shared defaults but clearly separated
-   from each track's own genuine variation (checked via each track's own deviation
-   percentiles, not cross-track comparison) -- fixed with --jump-threshold/
-   --outlier-threshold/--hysteresis-high/--hysteresis-low overrides tuned per track:
+   docstring). Its defaults are a cross-track compromise that isn't tight enough for every
+   track -- override per track with --jump-threshold/--outlier-threshold/
+   --hysteresis-high/--hysteresis-low when a track's own deviation percentiles show a real
+   leftover artifact under the shared defaults, e.g.:
      redbullring: --jump-threshold 10 --outlier-threshold 6 --hysteresis-high 8 --hysteresis-low 5
      yasmarina:   --jump-threshold 13 --outlier-threshold 8 --hysteresis-high 13 --hysteresis-low 8
-   Both validated via racing-line mode (src/optimal.rs) converging with the expected
-   negative-or-near-zero delta against the fixed-line lap time.
-6. Singapore remains unresolved, and it's NOT a despike_offset problem. Initial suspicion
-   (an OSM lane-tag glitch making the boundary WIDTH itself jump abruptly) didn't survive
-   closer inspection: at s~3924 center_offset jumps from -5.5 to +8.3 over 7.5m of raw
-   track distance, then holds around +8 and decays smoothly over the next ~170m -- the
-   opposite of a nearest-point mismatch's signature (which snaps in *and* back out sharply,
-   like Suzuka's crossover). That shape means it's real track geometry, not bad OSM data,
-   so no despike threshold -- global or per-track -- should touch it; doing so would
-   silently interpolate away a genuine corner. Confirmed this is a model-fit problem, not a
-   data or grid-resolution one: re-running racing-line mode at a finer 10m solver grid
-   (instead of the usual 25m) still doesn't produce a trustworthy solve -- Ipopt reports
-   "SolveSucceeded" but with the racing line coming out *slower* than the fixed-line lap
-   time (delta +54s), which is impossible since n=0 is always a feasible point of the same
-   problem (see main.rs's built-in check) -- so the solver is landing on a bad local point,
-   not actually solving it, at either grid spacing. The real corner's offset changes faster
-   than the solver's steering-rate assumption (xi_bound / the small-angle approximation
-   optimal.rs's formulation relies on) can represent. Left as a known limitation alongside
-   Bahrain/Catalunya/Sochi/Mexico rather than pursued further.
+   Validate any override via racing-line mode converging with a negative-or-near-zero delta
+   against the fixed-line lap time.
+6. Singapore remains unresolved -- confirmed to be real track geometry hitting the
+   solver's steering-rate/small-angle model limit (optimal.rs), not an OSM data problem.
+   See DISCUSSION.md for the diagnosis. Left as a known limitation alongside
+   Bahrain/Catalunya/Sochi/Mexico.
 
 Usage:
   python export_osm_boundaries.py --track singapore --relation-name "Marina Bay"
