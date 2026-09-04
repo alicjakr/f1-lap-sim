@@ -88,6 +88,20 @@ Produced by the Python export scripts below, keyed by the same `<slug>_` prefix:
 | `<slug>_drs_zones.csv` | `export_track.py` | DRS modeling (falls back to DRS-closed if missing) |
 | `<slug>_aero_params.csv` | `derive_downforce.py` | per-track aero (falls back to a coarse 3-tier default if missing) |
 
+## Web UI
+
+An interactive alternative to the CLI: pick a track, hit Solve, and explore the racing
+line and speed trace in the browser (live solve — it runs the same `solve_racing_line`
+pipeline as `cargo run -- <track> racingline`, not a replay of precomputed data).
+
+```
+cargo run --release --bin web
+```
+
+Then open `http://127.0.0.1:3000`. Requires the same `data/` inputs as CLI `racingline`
+mode (see the table above) — the track selector only lists tracks that have a
+`<slug>_track_boundaries.csv`.
+
 ## Python data-export scripts
 
 All run from the repo root with the venv active. Each has a fuller usage docstring at

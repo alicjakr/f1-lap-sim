@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 Lap Sim</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>F1 Racing Line Solver</h1>
+  <div class="controls">
+    <label>Track <select id="track"></select></label>
+    <label>Spacing (m) <input id="spacing" type="number" value="25" min="5" max="100" step="5"></label>
+    <button id="solve">Solve</button>
+    <span id="status"></span>
+  </div>
+</header>
+<main>
+  <section id="track-panel">
+    <svg id="track-view"></svg>
+  </section>
+  <section id="side-panel">
+    <div id="stats"></div>
+    <svg id="speed-trace"></svg>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
