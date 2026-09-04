@@ -9,10 +9,17 @@ const speedSvg = d3.select('#speed-trace');
 
 const tooltip = d3.select('body').append('div').attr('class', 'tooltip');
 
+let trackInfoBySlug = {};
+
 async function loadTracks() {
   const res = await fetch('/api/tracks');
   const tracks = await res.json();
-  trackSelect.innerHTML = tracks.map(t => `<option value="${t}">${t}</option>`).join('');
+  trackInfoBySlug = Object.fromEntries(tracks.map(t => [t.slug, t]));
+  trackSelect.innerHTML = tracks.map(t => {
+    const label = t.known_issue ? `${t.slug} ⚠️` : t.slug;
+    const title = t.known_issue ? ` title="${t.known_issue.replace(/"/g, '&quot;')}"` : '';
+    return `<option value="${t.slug}"${title}>${label}</option>`;
+  }).join('');
 }
 
 function formatLapTime(seconds) {
@@ -115,11 +122,18 @@ function renderSpeedTrace(result) {
 }
 
 function renderStats(result) {
-  const delta = result.lap_time_s - result.fixed_line_time_s;
-  statsEl.innerHTML = `
-    <div class="stat"><span class="label">Lap time</span><span class="value">${formatLapTime(result.lap_time_s)}</span></div>
-    <div class="stat"><span class="label">Fixed-line lap time</span><span class="value">${formatLapTime(result.fixed_line_time_s)}</span></div>
-    <div class="stat"><span class="label">Delta</span><span class="value">${delta.toFixed(3)} s</span></div>
+  const real = result.real_lap_time_2018_s;
+  const realRow = real == null
+    ? ''
+    : `
+    <div class="stat"><span class="label">2018 pole time</span><span class="value">${formatLapTime(real)}</span></div>
+    <div class="stat"><span class="label">Delta vs. 2018</span><span class="value">${(result.lap_time_s - real).toFixed(3)} s</span></div>`;
+
+  const issue = trackInfoBySlug[result.track] && trackInfoBySlug[result.track].known_issue;
+  const warningBanner = issue ? `<div class="warning">⚠️ ${issue}</div>` : '';
+
+  statsEl.innerHTML = `${warningBanner}
+    <div class="stat"><span class="label">Solver lap time</span><span class="value">${formatLapTime(result.lap_time_s)}</span></div>${realRow}
     <div class="stat"><span class="label">Mean |n|</span><span class="value">${result.mean_abs_n.toFixed(2)} m</span></div>
     <div class="stat"><span class="label">Max |n|</span><span class="value">${result.max_abs_n.toFixed(2)} m</span></div>
   `;

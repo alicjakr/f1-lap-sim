@@ -30,6 +30,15 @@ main {
 .stat { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.9rem; }
 .stat .label { color: #9aa0ac; }
 .error { color: #ff6b6b; font-size: 0.9rem; }
+.warning {
+  color: #ffcc66;
+  font-size: 0.8rem;
+  background: #2a2416;
+  border: 1px solid #4a3f24;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
 #speed-trace { width: 100%; height: 220px; background: #0b0d12; border-radius: 8px; }
 .boundary { fill: none; stroke: #4a4f5e; stroke-width: 1.5; }
 .reference { fill: none; stroke: #6a7080; stroke-width: 1; stroke-dasharray: 4 4; }

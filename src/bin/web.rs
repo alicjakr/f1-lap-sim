@@ -19,7 +19,7 @@ fn default_spacing() -> f64 {
     25.0
 }
 
-async fn tracks() -> Json<Vec<String>> {
+async fn tracks() -> Json<Vec<api::TrackInfo>> {
     Json(api::available_tracks())
 }
 

@@ -18,6 +18,62 @@ const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010); // Cd=0.85, Cl=2.47
 const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
 const DRS_DRAG_REDUCTION: f64 = 0.88;
 
+// Real 2018 qualifying pole time per track (session.laps.pick_fastest() in Q, fetched via
+// FastF1 -- same source/methodology as python_scripts/validate_pole_times.py), in seconds.
+// Historical fact, not derived data, so it's a static table rather than a data/ export.
+const POLE_TIME_2018: &[(&str, f64)] = &[
+    ("bahrain", 87.958),
+    ("baku", 101.498),
+    ("catalunya", 76.173),
+    ("cota", 92.237),
+    ("hockenheim", 71.212),
+    ("hungaroring", 76.666),
+    ("interlagos", 67.281),
+    ("monaco", 70.810),
+    ("montreal", 70.764),
+    ("monza", 79.119),
+    ("paulricard", 90.029),
+    ("redbullring", 63.130),
+    ("shanghai", 91.095),
+    ("silverstone", 85.892),
+    ("singapore", 96.015),
+    ("spa", 101.501),
+    ("suzuka", 87.760),
+    ("yasmarina", 94.794),
+];
+
+pub fn pole_time_2018(track: &str) -> Option<f64> {
+    POLE_TIME_2018.iter().find(|(slug, _)| *slug == track).map(|(_, t)| *t)
+}
+
+// Tracks with a boundaries CSV present but known-bad data, documented in
+// results/DISCUSSION.md's "6 known limitations" table -- kept solvable rather than hidden
+// (the CLI already ran them before this UI existed), but flagged so the UI can warn.
+const KNOWN_DATA_ISSUES: &[(&str, &str)] = &[
+    (
+        "bahrain",
+        "OSM boundary data is unusable here (the relation bundles multiple real track layouts, e.g. car vs. motorcycle circuit; registration residual 35-63 m). Racing line and lap time are not reliable.",
+    ),
+    (
+        "catalunya",
+        "OSM boundary data is unusable here (the relation bundles multiple real track layouts, e.g. car vs. motorcycle circuit; registration residual 35-63 m). Racing line and lap time are not reliable.",
+    ),
+    (
+        "singapore",
+        "A real corner's geometry exceeds the solver's steering-rate model limit here -- Ipopt may report success with an unreliable racing line.",
+    ),
+];
+
+pub fn known_data_issue(track: &str) -> Option<&'static str> {
+    KNOWN_DATA_ISSUES.iter().find(|(slug, _)| *slug == track).map(|(_, msg)| *msg)
+}
+
+#[derive(Serialize)]
+pub struct TrackInfo {
+    pub slug: String,
+    pub known_issue: Option<&'static str>,
+}
+
 // mu_lat/mu_lon/p_engine are tire/powertrain properties, fixed across tracks (see
 // README.md/DISCUSSION.md for sourcing). c_l/c_d are wing-level, per-circuit choices:
 // prefer data/<slug>_aero_params.csv (python_scripts/derive_downforce.py) over the coarse
@@ -46,6 +102,7 @@ pub struct RacingLineResult {
     pub spacing: f64,
     pub lap_time_s: f64,
     pub fixed_line_time_s: f64,
+    pub real_lap_time_2018_s: Option<f64>,
     pub mean_abs_n: f64,
     pub max_abs_n: f64,
     pub s: Vec<f64>,
@@ -105,12 +162,14 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
     let (x_right, y_right) = offset_line(&coarse_points, &n_right_coarse);
 
     let speed_kmh: Vec<f64> = v_final.iter().map(|v| v * 3.6).collect();
+    let real_lap_time_2018_s = pole_time_2018(track);
 
     Ok(RacingLineResult {
         track: track.to_string(),
         spacing,
         lap_time_s,
         fixed_line_time_s,
+        real_lap_time_2018_s,
         mean_abs_n,
         max_abs_n,
         s: target_s,
@@ -129,16 +188,20 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
 
 /// Track slugs with racing-line-capable data (a boundaries CSV present under data/),
 /// scanned rather than hardcoded so a newly-exported track shows up with no code change.
-pub fn available_tracks() -> Vec<String> {
-    let mut tracks: Vec<String> = fs::read_dir("data")
+/// Each carries known_issue (see KNOWN_DATA_ISSUES) so the UI can warn on a track whose
+/// boundary data is documented as unreliable, rather than silently hiding it.
+pub fn available_tracks() -> Vec<TrackInfo> {
+    let mut tracks: Vec<TrackInfo> = fs::read_dir("data")
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            name.strip_suffix("_track_boundaries.csv").map(|s| s.to_string())
+            let slug = name.strip_suffix("_track_boundaries.csv")?.to_string();
+            let known_issue = known_data_issue(&slug);
+            Some(TrackInfo { slug, known_issue })
         })
         .collect();
-    tracks.sort();
+    tracks.sort_by(|a, b| a.slug.cmp(&b.slug));
     tracks
 }
