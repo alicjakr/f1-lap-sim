@@ -1,138 +1,80 @@
 use std::env;
 use std::path::Path;
-use crate::optimal::{coarsen_stride, resample_bounds, solve_min_time, solve_racing_line};
-use crate::solver::{lap_time, CarParams, export_velocity_csv};
-use crate::track::{export_curvature_csv, export_racing_line_csv, fit_periodic_bspline, load_aero_params, load_boundaries, load_drs_zones, load_track_geometry, offset_line, resample, total_length};
 
-mod track;
-mod solver;
-mod optimal;
+use f1_lap_sim::{api, optimal, solver, track};
 
 fn main() {
     // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
-    let track = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
+    let track_slug = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
     // "racingline" (default, primary solver) or "optimal" (fixed-line fallback and
     // racingline's correctness baseline) -- see README.md for the full CLI reference.
     let mode = env::args().nth(2).unwrap_or_else(|| "racingline".to_string());
     // Only used in "optimal"/"racingline" modes: target collocation-point spacing in meters.
     let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(25.0);
-    let geometry_path = format!("data/{}_track_geometry.csv", track);
-    let curvature_debug_path = format!("data/{}_curvature_debug.csv", track);
-    let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track);
-    let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track);
-    let racingline_xy_path = format!("data/{}_racingline_path.csv", track);
-    let boundaries_path = format!("data/{}_track_boundaries.csv", track);
-    let drs_zones_path = format!("data/{}_drs_zones.csv", track);
-    let aero_params_path = format!("data/{}_aero_params.csv", track);
+    let geometry_path = format!("data/{}_track_geometry.csv", track_slug);
+    let curvature_debug_path = format!("data/{}_curvature_debug.csv", track_slug);
+    let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track_slug);
+    let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track_slug);
+    let racingline_xy_path = format!("data/{}_racingline_path.csv", track_slug);
+    let drs_zones_path = format!("data/{}_drs_zones.csv", track_slug);
 
-    let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path)).unwrap();
-    let length = total_length(&track_geometry, &t);
+    let (track_geometry, t) = track::load_track_geometry(Path::new(&geometry_path)).unwrap();
+    let length = track::total_length(&track_geometry, &t);
     // One control point roughly every 25m: far fewer than the raw GPS point count, so the
     // fitted curve is structurally incapable of reproducing point-to-point GPS noise.
     let control_points = (length / 12.0).round() as usize;
-    let smoother = fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
-    let (resampled, curvature) = resample(&smoother, 1.0);
-    export_curvature_csv(&curvature, 1.0, Path::new(&curvature_debug_path)).unwrap();
+    let smoother = track::fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
+    let (resampled, curvature) = track::resample(&smoother, 1.0);
+    track::export_curvature_csv(&curvature, 1.0, Path::new(&curvature_debug_path)).unwrap();
 
     println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
-    // mu_lat/mu_lon/p_engine are tire and powertrain properties (fixed across tracks, not
-    // wing-angle choices): mass 734 kg (2018 min car+driver, near-empty quali fuel),
-    // mu_lat/mu_lon from published tire-only friction estimates, p_engine from 625 kW ICE +
-    // 120 kW MGU-K peak (no ERS energy budget modeled). Braking is derived purely from the
-    // friction ellipse, no separate flat floor -- see DISCUSSION.md for why that floor was
-    // dropped. c_l/c_d are wing-level, per-circuit choices: prefer real per-track values
-    // from python_scripts/derive_downforce.py (see its docstring), falling back to the
-    // coarse 3-tier classification below when data/<slug>_aero_params.csv doesn't exist yet.
-    const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
-    const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);  // Cd=0.85, Cl=2.47
-    const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
-
-    // DRS (rear wing flap) cuts drag by roughly 10-15% while open, per published estimates;
-    // it never affects cornering since it's closed again before the braking zone. Applied as
-    // a flat reduction on whichever downforce tier's Cd is already chosen above, in the
-    // per-point drag profile built from data/<slug>_drs_zones.csv (see optimal::resample_drs)
-    // -- not a fourth downforce tier of its own.
-    const DRS_DRAG_REDUCTION: f64 = 0.88;
-
-    // 2018 calendar (21 rounds), tiered by circuit character: tight/technical -> high,
-    // long-straight power circuits -> low, everything else -> medium (see DISCUSSION.md
-    // for sourcing and known approximations, e.g. Mexico's altitude effect).
-    let (c_l, c_d) = match track.as_str() {
-        "monaco" | "hungaroring" | "singapore" | "catalunya" => HIGH_DOWNFORCE,
-        "baku" | "montreal" | "redbullring" | "spa" | "monza" => LOW_DOWNFORCE,
-        "melbourne" | "bahrain" | "shanghai" | "paulricard" | "silverstone" | "hockenheim"
-        | "sochi" | "suzuka" | "cota" | "mexico" | "interlagos" | "yasmarina" => MED_DOWNFORCE,
-        _ => MED_DOWNFORCE, // fallback for unrecognized slugs
-    };
-    let (c_l, c_d) = load_aero_params(Path::new(&aero_params_path)).unwrap_or((c_l, c_d));
-    let parameters = CarParams {
-        mu_lat: 1.6,
-        mu_lon: 1.55,
-        c_l,
-        c_d,
-        c_d_drs: c_d * DRS_DRAG_REDUCTION,
-        p_engine: 1015.0,
-    };
+    // Car params (mass/tire/engine + per-circuit aero) -- see api::load_car_params and
+    // README.md/DISCUSSION.md for sourcing.
+    let parameters = api::load_car_params(&track_slug);
 
     // Per-point DRS-open flag along the same driven lap the geometry above came from (see
     // export_track.py's drs_zones.csv) -- missing for a track with no DRS export (e.g. one
     // exported before this feature existed), in which case every point falls back to
     // params.c_d (DRS always closed).
-    let (drs_s, drs_open) = load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
+    let (drs_s, drs_open) = track::load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
     if mode == "optimal" {
-        let (v_final, obj_lap_time, ds_coarse) = solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
+        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;
         println!("Lap time (optimal, objective value): {}:{:06.3}", minutes, seconds);
-        let lap_time_check = lap_time(&v_final, ds_coarse);
+        let lap_time_check = solver::lap_time(&v_final, ds_coarse);
         println!("Lap time (recomputed from returned velocity profile): {:.3}s", lap_time_check);
-        export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_optimal_path)).unwrap();
+        solver::export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_optimal_path)).unwrap();
         return;
     }
 
     if mode == "racingline" {
-        let (bound_s, n_left, n_right) = load_boundaries(Path::new(&boundaries_path)).unwrap();
-        let (v_final, n_profile, racing_line_time, ds_coarse) =
-            solve_racing_line(&curvature, 1.0, &parameters, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open);
-        let minutes = (racing_line_time / 60.0) as u32;
-        let seconds = racing_line_time % 60.0;
-        println!("Lap time (racing line): {}:{:06.3}", minutes, seconds);
+        let result = api::solve_racing_line_for_track(&track_slug, spacing).unwrap_or_else(|e| panic!("{}", e));
 
-        let mean_abs_n = n_profile.iter().map(|n| n.abs()).sum::<f64>() / n_profile.len() as f64;
-        let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
-        println!("Lateral offset used: mean |n| = {:.2} m, max |n| = {:.2} m", mean_abs_n, max_abs_n);
+        let minutes = (result.lap_time_s / 60.0) as u32;
+        let seconds = result.lap_time_s % 60.0;
+        println!("Lap time (racing line): {}:{:06.3}", minutes, seconds);
+        println!("Lateral offset used: mean |n| = {:.2} m, max |n| = {:.2} m", result.mean_abs_n, result.max_abs_n);
 
         // n=0 is a feasible point of this same problem (it's exactly the fixed-line
         // problem), so the racing line can never come out slower -- a useful built-in
         // correctness check, not just a comparison.
-        let (_, fixed_line_time, _) = solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
         println!(
             "Fixed-line optimal lap time for comparison: {:.3}s (racing line should be <= this; delta = {:.3}s)",
-            fixed_line_time, racing_line_time - fixed_line_time
+            result.fixed_line_time_s, result.lap_time_s - result.fixed_line_time_s
         );
 
-        export_velocity_csv(&v_final, ds_coarse, Path::new(&simulated_lap_racingline_path)).unwrap();
+        let ds_coarse = result.s[1] - result.s[0];
+        let velocity_ms: Vec<f64> = result.speed_kmh.iter().map(|v| v / 3.6).collect();
+        solver::export_velocity_csv(&velocity_ms, ds_coarse, Path::new(&simulated_lap_racingline_path)).unwrap();
 
-        // X/Y path for visualization: subsample the fine-resolution (ds=1m) resampled
-        // centerline with the same stride solve_racing_line used to build its coarse
-        // curvature grid, so index i here lines up with n_profile[i] exactly.
-        let stride = coarsen_stride(1.0, spacing);
-        let coarse_points: Vec<_> = resampled.iter().step_by(stride).cloned().collect();
-        let x_ref: Vec<f64> = coarse_points.iter().map(|p| p.x).collect();
-        let y_ref: Vec<f64> = coarse_points.iter().map(|p| p.y).collect();
-        let (x_line, y_line) = offset_line(&coarse_points, &n_profile);
-
-        let target_s: Vec<f64> = (0..coarse_points.len()).map(|i| i as f64 * ds_coarse).collect();
-        let (n_left_coarse, n_right_coarse) = resample_bounds(&bound_s, &n_left, &n_right, &target_s);
-        let (x_left, y_left) = offset_line(&coarse_points, &n_left_coarse);
-        let (x_right, y_right) = offset_line(&coarse_points, &n_right_coarse);
-
-        export_racing_line_csv(
-            &x_ref, &y_ref, &x_line, &y_line, &x_left, &y_left, &x_right, &y_right,
-            &n_profile, &v_final, ds_coarse, Path::new(&racingline_xy_path),
+        track::export_racing_line_csv(
+            &result.x_ref, &result.y_ref, &result.x_line, &result.y_line,
+            &result.x_left, &result.y_left, &result.x_right, &result.y_right,
+            &result.n_profile, &velocity_ms, ds_coarse, Path::new(&racingline_xy_path),
         ).unwrap();
         println!("Exported racing-line X/Y path -> {}", racingline_xy_path);
 

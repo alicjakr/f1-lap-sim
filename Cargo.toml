@@ -3,5 +3,9 @@ name = "f1-lap-sim"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "f1_lap_sim"
+path = "src/lib.rs"
+
 [dependencies]
 ipopt = "0.6"
