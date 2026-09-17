@@ -287,12 +287,18 @@ pub fn resample(spline: &PeriodicBSpline, ds: f64) -> (Vec<Point>, Vec<f64>) {
 }
 
 
+// Half the width of a 2018 car (2.0 m regulation maximum), subtracted from each side's
+// boundary offset in load_boundaries below.
+const CAR_HALF_WIDTH_M: f64 = 1.0;
+
 // Reads python_scripts/export_osm_boundaries.py's output: s,x,y,n_left,n_right. The x,y
 // columns are dropped -- they're the same reference line already loaded via
 // load_track_geometry, so only the arc-length axis and the two offset bounds are needed.
 // That `s` axis is FastF1's raw Distance channel, the same one load_track_geometry uses --
 // NOT the periodic B-spline's own arc-length parameterization that resample() produces, so
 // callers matching this against a curvature array need to interpolate, not index directly.
+// The raw offsets are narrowed by the car's half width and re-centered onto the driven line
+// (see the body) before being handed to the solver.
 pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
     let mut s: Vec<f64> = Vec::new();
@@ -310,9 +316,21 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
         cols.next().ok_or("missing y")?; // y, unused
         let left = cols.next().ok_or("missing n_left")?.parse::<f64>()?;
         let right = cols.next().ok_or("missing n_right")?.parse::<f64>()?;
+        let half_width = (left - right) / 2.0;
+        let center = (left + right) / 2.0;
+        // The car's own width has to fit inside the paved surface: its centerline can reach
+        // the edge minus half a car, not the edge itself.
+        let usable = (half_width - CAR_HALF_WIDTH_M).max(0.0);
+        // `center` is where the OSM road centerline sits relative to the driven line, so it
+        // carries the ICP registration error (up to ~16 m on Monaco, see DISCUSSION.md) on
+        // top of the real racing-line-vs-road-center offset. A driven lap was physically on
+        // the track, so an offset that puts the driven line outside the usable width is
+        // registration error, not geometry -- clamp it back to just touching the edge rather
+        // than handing the solver a corridor wider than the real track.
+        let center = center.clamp(-usable, usable);
         s.push(s_i);
-        n_left.push(left);
-        n_right.push(right);
+        n_left.push(center + usable);
+        n_right.push(center - usable);
     }
 
     Ok((s, n_left, n_right))
