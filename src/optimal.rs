@@ -9,8 +9,12 @@
 //   x[i+1] - x[i] - (u[i] + u[i+1])*ds = 0   (indices wrap mod n)
 //
 // Path constraints per point: friction ellipse and traction-power ceiling:
-//   (x*kappa)^2 / (mu_lat*g_eff)^2 + u^2 / (mu_lon*g_eff)^2 <= 1,   g_eff = G + c_l*x
+//   (x*kappa)^2 / (mu_lat*g_eff)^2 + w^2 / (mu_lon*g_eff)^2 <= 1,   g_eff = G + c_l*x
 //   u <= p_engine/sqrt(x) - c_d*x
+// where w = u + c_d*x is the longitudinal force the *tires* must provide: u is the net
+// acceleration (drag included, as the dynamics and power ceiling above require), so drag
+// has to be added back to get the tire's share -- it helps under braking and costs under
+// acceleration.
 //
 // Objective: minimize sum(ds / v[i]), the same lap-time quantity solver::lap_time measures.
 //
@@ -18,9 +22,10 @@
 // objective and ellipse/power constraints need second derivatives. With g = G + c_l*x,
 // K = kappa, L = mu_lat, M = mu_lon:
 //   d2f/dx2   = 0.75*ds*x^-2.5                                        (objective, diagonal)
-//   d2E/dx2   = -6*c_l*(K^2*x*G/L^2 - c_l*u^2/M^2)/g^4 + 2*K^2*G/(L^2*g^3)
+//   d2E/dx2   = 2*K^2*G/(L^2*g^3) - 6*c_l*K^2*x*G/(L^2*g^4)
+//               + (2/M^2)*[(c_d^2*g - c_d*c_l*w)/g^3 - 3*c_l*(c_d*g*w - c_l*w^2)/g^4]
 //   d2E/du2   = 2/(M^2*g^2)
-//   d2E/dxdu  = -4*c_l*u/(M^2*g^3)
+//   d2E/dxdu  = 2*c_d/(M^2*g^2) - 4*c_l*w/(M^2*g^3)
 //   d2P/dx2   = -0.75*p_engine*x^-2.5
 // (d2P/du2 = d2P/dxdu = 0 -- power is linear in u.) Sparsity: 3 entries per point (x
 // diagonal, u diagonal, x-u cross term).
@@ -31,39 +36,37 @@ use crate::solver::{backward_pass, corner_speed_limits, forward_pass, top_speed_
 
 const G: f64 = 9.81;
 
-// Regularization weight on xi's point-to-point differences in RacingLineProblem's
-// objective (eps*sum((xi_i-xi_{i+1})^2)). Without it, the xi/kappa chain has an exact
-// null-space direction -- an alternating xi_i=+A, xi_{i+1}=-A pattern satisfies the
-// n-defect equation for free at any amplitude while letting kappa shape the ellipse
-// constraint favorably, a numerical artifact rather than real physics (see
-// DISCUSSION.md's "numerical artifact" section for how this was caught and why the
-// weight penalizes the difference rather than raw xi magnitude). Calibrated against the
-// pinned-n regression check (track width forced to ~0 m, racing line must reproduce
-// MinTimeProblem's lap time); the gap at this weight is ordinary discretization error,
-// not a residual exploit.
-const XI_REG_WEIGHT: f64 = 2000.0;
-
-// Same null-space problem one level down (kappa can still checkerboard around kappa_ref
-// once xi alone is regularized). Needs its own weight, not XI_REG_WEIGHT, because kappa
-// has more direct leverage on the ellipse constraint (a_lat = x*kappa) than xi does.
-// Calibrated the same way as XI_REG_WEIGHT.
-const KAPPA_REG_WEIGHT: f64 = 2000.0;
-
-/// Sample stride for coarsening a full-resolution (ds=full_ds) array down to roughly
-/// `target_spacing` meters between points. Exposed so callers with a matching
-/// full-resolution array indexed the same way as the curvature array (e.g. main.rs's
-/// resampled X/Y points) can subsample it to line up index-for-index with solve_min_time/
-/// solve_racing_line's coarse grid.
-pub fn coarsen_stride(full_ds: f64, target_spacing: f64) -> usize {
-    (target_spacing / full_ds).round().max(1.0) as usize
+/// Coarse periodic grid over a full-resolution lap of `n_full` samples spaced `full_ds`
+/// apart: `m` points spaced exactly `L/m`, so the wrap-around segment back to the start is
+/// the same length as every other one (an integer stride leaves it short while the
+/// collocation still treats it as a full ds, overstating the lap length by up to one ds).
+pub fn coarse_grid(n_full: usize, full_ds: f64, target_spacing: f64) -> (usize, f64) {
+    let length = n_full as f64 * full_ds;
+    let m = ((length / target_spacing).round() as usize).max(3);
+    (m, length / m as f64)
 }
 
-/// Subsamples a full-resolution (ds=1m) curvature array down to roughly `target_spacing`
-/// meters between points, returning the coarse curvature array and its new ds.
-fn coarsen(curvature: &[f64], full_ds: f64, target_spacing: f64) -> (Vec<f64>, f64) {
-    let stride = coarsen_stride(full_ds, target_spacing);
-    let coarse: Vec<f64> = curvature.iter().step_by(stride).cloned().collect();
-    (coarse, full_ds * stride as f64)
+/// Periodic linear interpolation of a full-resolution array (sample i at s = i*full_ds)
+/// onto coarse_grid's points. Returns the coarse array and its ds.
+pub fn coarsen_periodic(values: &[f64], full_ds: f64, target_spacing: f64) -> (Vec<f64>, f64) {
+    let n = values.len();
+    let (m, ds) = coarse_grid(n, full_ds, target_spacing);
+    let coarse = (0..m)
+        .map(|k| {
+            let pos = k as f64 * ds / full_ds;
+            let i = pos.floor() as usize;
+            let frac = pos - i as f64;
+            values[i % n] * (1.0 - frac) + values[(i + 1) % n] * frac
+        })
+        .collect();
+    (coarse, ds)
+}
+
+fn check_status(status: SolveStatus) -> Result<(), String> {
+    match status {
+        SolveStatus::SolveSucceeded | SolveStatus::SolvedToAcceptableLevel => Ok(()),
+        other => Err(format!("Ipopt did not converge: {:?}", other)),
+    }
 }
 
 struct MinTimeProblem {
@@ -154,8 +157,9 @@ impl ConstrainedProblem for MinTimeProblem {
         for i in 0..self.n {
             let g_eff = self.g_eff(xs[i]);
             let a_lat = xs[i] * self.curvature[i];
+            let w = us[i] + self.c_d[i] * xs[i]; // tire longitudinal force, drag added back
             g[self.n + i] = (a_lat / (self.params.mu_lat * g_eff)).powi(2)
-                + (us[i] / (self.params.mu_lon * g_eff)).powi(2);
+                + (w / (self.params.mu_lon * g_eff)).powi(2);
         }
         for i in 0..self.n {
             g[2 * self.n + i] =
@@ -219,18 +223,20 @@ impl ConstrainedProblem for MinTimeProblem {
             vals[k] = -self.ds;
             k += 1;
         }
-        // Ellipse E(x,u) = K^2*x^2/(L^2*g_eff^2) + u^2/(M^2*g_eff^2), g_eff = G + c_l*x.
-        // dE/dx simplifies to (2/g_eff^3) * [K^2*x*G/L^2 - c_l*u^2/M^2] since
-        // d/dx[x^2/g_eff^2] = 2x*G/g_eff^3 (the c_l terms cancel: g_eff - x*c_l = G).
+        // Ellipse E(x,u) = K^2*x^2/(L^2*g_eff^2) + w^2/(M^2*g_eff^2), g_eff = G + c_l*x,
+        // w = u + c_d*x. The lateral term's dE/dx uses d/dx[x^2/g_eff^2] = 2x*G/g_eff^3 (the
+        // c_l terms cancel: g_eff - x*c_l = G).
         for i in 0..self.n {
             let l = self.params.mu_lat;
             let m = self.params.mu_lon;
             let c_l = self.params.c_l;
+            let c_d = self.c_d[i];
             let kap = self.curvature[i];
             let g_eff = self.g_eff(xs[i]);
-            let de_dx = (2.0 / g_eff.powi(3))
-                * (kap.powi(2) * xs[i] * G / l.powi(2) - c_l * us[i].powi(2) / m.powi(2));
-            let de_du = 2.0 * us[i] / (m.powi(2) * g_eff.powi(2));
+            let w = us[i] + c_d * xs[i];
+            let de_dx = 2.0 * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(3))
+                + 2.0 * w * (c_d * g_eff - w * c_l) / (m.powi(2) * g_eff.powi(3));
+            let de_du = 2.0 * w / (m.powi(2) * g_eff.powi(2));
             vals[k] = de_dx;
             k += 1;
             vals[k] = de_du;
@@ -280,18 +286,24 @@ impl ConstrainedProblem for MinTimeProblem {
             let l = self.params.mu_lat;
             let m = self.params.mu_lon;
             let c_l = self.params.c_l;
+            let c_d = self.c_d[i];
             let kap = self.curvature[i];
             let g_eff = self.g_eff(xs[i]);
+            let w = us[i] + c_d * xs[i];
             let lambda_ellipse = lambda[self.n + i];
             let lambda_power = lambda[2 * self.n + i];
 
             let d2f_dx2 = 0.75 * self.ds * xs[i].powf(-2.5);
-            let d2e_dx2 = -6.0 * c_l * (kap.powi(2) * xs[i] * G / l.powi(2) - c_l * us[i].powi(2) / m.powi(2))
-                / g_eff.powi(4)
-                + 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3));
+            let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
+                - 6.0 * c_l * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(4))
+                + 2.0
+                    * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
+                        - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
+                    / m.powi(2);
             let d2p_dx2 = -0.75 * self.params.p_engine * xs[i].powf(-2.5);
             let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
-            let d2e_dxdu = -4.0 * c_l * us[i] / (m.powi(2) * g_eff.powi(3));
+            let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
+                - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
 
             let k = 3 * i;
             vals[k] = obj_factor * d2f_dx2 + lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2;
@@ -307,7 +319,7 @@ impl ConstrainedProblem for MinTimeProblem {
 /// curvature array). drs_s/drs_open are python_scripts/export_track.py's drs_zones.csv,
 /// resampled here onto the coarse grid via resample_drs -- pass empty slices for a track
 /// with no DRS data (every point then uses params.c_d, i.e. DRS always closed).
-/// Returns (velocity profile, lap time, coarse ds).
+/// Returns (velocity profile, lap time, coarse ds), or Err if Ipopt didn't converge.
 pub fn solve_min_time(
     curvature_full: &[f64],
     full_ds: f64,
@@ -315,8 +327,8 @@ pub fn solve_min_time(
     target_spacing: f64,
     drs_s: &[f64],
     drs_open: &[bool],
-) -> (Vec<f64>, f64, f64) {
-    let (curvature, ds) = coarsen(curvature_full, full_ds, target_spacing);
+) -> Result<(Vec<f64>, f64, f64), String> {
+    let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
     // Warm start from the existing two-pass sweep on the same coarse grid (not periodic,
@@ -389,48 +401,51 @@ pub fn solve_min_time(
     } = ipopt.solve();
 
     println!("Ipopt status: {:?}", status);
+    check_status(status)?;
 
     let velocity: Vec<f64> = solution.primal_variables[0..n].iter().map(|x| x.sqrt()).collect();
-    (velocity, objective_value, ds)
+    Ok((velocity, objective_value, ds))
 }
 
 // --- Racing-line optimization: free lateral offset on top of the fixed-line solver above ---
 // Adds lateral offset n(s) (bounded by track width, data/<slug>_track_boundaries.csv),
 // heading xi(s) relative to the track tangent, and path curvature kappa(s) as a free
 // control (replacing MinTimeProblem's fixed curvature array). Heading-based curvilinear
-// formulation, standard in minimum-time lap-sim literature (Perantoni & Limebeer) -- see
-// DISCUSSION.md for why this was chosen over the two rejected alternatives.
-//
-// With h(s) = 1 - n(s)*kappa_ref(s) (the path-length stretch factor) and the small-angle
-// approximation tan(xi)=xi, cos(xi)=1 (valid for the realistic heading deviations a racing
-// line produces; xi is bounded as a validity rail, not a physical limit):
+// formulation (Perantoni & Limebeer). With h(s) = 1 - n(s)*kappa_ref(s) (path-length
+// stretch factor) and the small-angle approximation tan(xi)=xi, cos(xi)=1 (xi is bounded as
+// a validity rail, not a physical limit):
 //   dn/ds = h*xi
 //   dxi/ds = kappa*h - kappa_ref
-//   dt/ds = h/v          (replaces MinTimeProblem's implicit 1/v, i.e. h=1)
-//   a_lat = v^2*kappa = x*kappa      (kappa now free, was the fixed curvature array)
+//   dt/ds = h/v
+//   dx/ds = 2*u*h        (the car covers h*ds of path per ds of reference line)
+//   a_lat = x*kappa
 //
-// Variables, 5n total (n=0 replaces MinTimeProblem's fixed-line case exactly, since n=0,
-// xi=0, kappa=kappa_ref makes every new term collapse to MinTimeProblem's): [x(n), u(n),
-// n(n), xi(n), kappa(n)] at offsets 0, n, 2n, 3n, 4n.
+// Staggered grid: x, u, n, kappa live on the nodes, xi on the segments (xi[i] is the heading
+// over segment i -> i+1):
+//   n-defect[i]  = n[i+1] - n[i] - ds*xi[i]*(h[i] + h[i+1])/2
+//   xi-defect[i] = xi[i] - xi[i-1] - ds*(kappa[i]*h[i] - kappa_ref[i])
+// so xi is fixed by n's first differences and kappa by xi's. With all three on the nodes
+// (plain trapezoidal), an alternating xi/kappa pattern satisfies both defects at any
+// amplitude while letting kappa undercut kappa_ref at speed-limiting nodes -- an exact
+// odd-even null space the solver exploits for a spurious lap-time gain. The staggered grid
+// removes that mode structurally, so no regularization is needed.
 //
-// Constraints, 5n total: [x-defect(n), n-defect(n), xi-defect(n), ellipse(n), power(n)] at
-// row offsets 0, n, 2n, 3n, 4n. x-defect and power are unchanged from MinTimeProblem;
-// ellipse is the same functional form with kappa replacing the fixed curvature array.
+// Variables, 5n: [x, u, n, xi, kappa] at offsets 0, n, 2n, 3n, 4n.
+// Constraints, 5n: [x-defect, n-defect, xi-defect, ellipse, power] at row offsets 0, n, 2n,
+// 3n, 4n. Power is unchanged from MinTimeProblem; the ellipse is the same functional form
+// with kappa in place of the fixed curvature; the x-defect carries the same h as dt/ds does,
+// so speed changes are integrated over the path actually driven rather than over the
+// reference line. n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly.
 //
-// n-defect[i] = n[i+1] - n[i] - ds/2*(h_i*xi_i + h_{i+1}*xi_{i+1})
-// xi-defect[i] = xi[i+1] - xi[i] - ds/2*((kappa_i*h_i - kappa_ref_i) + (kappa_{i+1}*h_{i+1} - kappa_ref_{i+1}))
-//
-// Both are bilinear in their own-index variables (n*xi, kappa*n), so unlike MinTimeProblem
-// (where the linear x-defect contributes nothing to the Hessian), these two contribute new
-// Hessian terms -- but only at each defect's own two endpoints, never across non-adjacent
-// points, so the Hessian sparsity pattern stays "one block per point" as before, just a
-// bigger block. New per-point Hessian pairs (K=kappa_i, L=mu_lat, M=mu_lon, g=g_eff):
-//   d2E/dK2   = 2*x^2/(L^2*g^2)                                          (ellipse)
-//   d2E/dKdx  = 4*x*K/(L^2*g^2) - 4*x^2*K*c_l/(L^2*g^3)                  (ellipse)
-//   d2f/dxdn  = 0.5*ds*kappa_ref_i*x^-1.5                                (objective)
-//   d2(n-defect)/dn_i dxi_i = ds/2*kappa_ref_i     (per defect touching point i, accumulate
-//   d2(xi-defect)/dn_i dkappa_i = ds/2*kappa_ref_i  both the defect starting at i AND the
-//                                                    one ending at i -- see hessian_values)
+// Hessian terms beyond MinTimeProblem's (K=kappa_i, L=mu_lat, g=g_eff):
+//   d2E/dK2                      = 2*x^2/(L^2*g^2)
+//   d2E/dKdx                     = 4*x*K/(L^2*g^2) - 4*x^2*K*c_l/(L^2*g^3)
+//   d2f/dxdn                     = 0.5*ds*kappa_ref_i*x^-1.5
+//   d2(n-defect[i])/dxi_i dn_i     = ds*kappa_ref_i/2
+//   d2(n-defect[i])/dxi_i dn_{i+1} = ds*kappa_ref_{i+1}/2
+//   d2(xi-defect[i])/dK_i dn_i     = ds*kappa_ref_i
+//   d2(x-defect)/du_i dn_i         = ds*kappa_ref_i (from the defects both starting and
+//                                    ending at i -- see hessian_values)
 
 /// Linearly interpolates n_left(s)/n_right(s) from the boundary CSV's own arc-length axis
 /// (FastF1's raw Distance channel, via track::load_boundaries) onto the solver's coarse
@@ -546,26 +561,14 @@ impl BasicProblem for RacingLineProblem {
 
     fn objective(&self, x: &[Number], _new_x: bool, obj: &mut Number) -> bool {
         let n = self.n;
-        let xis = &x[3 * n..4 * n];
-        let kappas = &x[4 * n..5 * n];
-        let lap_time: f64 = (0..n)
+        *obj = (0..n)
             .map(|i| self.ds * self.h(x[2 * n + i], i) / x[i].sqrt())
             .sum();
-        let reg: f64 = (0..n)
-            .map(|i| {
-                let ip1 = self.next(i);
-                XI_REG_WEIGHT * (xis[i] - xis[ip1]).powi(2)
-                    + KAPPA_REG_WEIGHT * (kappas[i] - kappas[ip1]).powi(2)
-            })
-            .sum();
-        *obj = lap_time + reg;
         true
     }
 
     fn objective_grad(&self, x: &[Number], _new_x: bool, grad_f: &mut [Number]) -> bool {
         let n = self.n;
-        let xis = &x[3 * n..4 * n];
-        let kappas = &x[4 * n..5 * n];
         for i in 0..n {
             let h_i = self.h(x[2 * n + i], i);
             grad_f[i] = -0.5 * self.ds * h_i * x[i].powf(-1.5);
@@ -573,18 +576,6 @@ impl BasicProblem for RacingLineProblem {
             grad_f[2 * n + i] = -self.ds * self.curvature[i] / x[i].sqrt();
             grad_f[3 * n + i] = 0.0;
             grad_f[4 * n + i] = 0.0;
-        }
-        // d/d(xi_j) of sum_i eps*(xi_i-xi_{i+1})^2 picks up a term from segment i=j (as the
-        // left endpoint) and from segment i=prev(j) (as the right endpoint) -- accumulate
-        // both into point j's slot rather than point i's, since this is a per-segment sum.
-        for i in 0..n {
-            let ip1 = self.next(i);
-            let d_xi = 2.0 * XI_REG_WEIGHT * (xis[i] - xis[ip1]);
-            grad_f[3 * n + i] += d_xi;
-            grad_f[3 * n + ip1] -= d_xi;
-            let d_kappa = 2.0 * KAPPA_REG_WEIGHT * (kappas[i] - kappas[ip1]);
-            grad_f[4 * n + i] += d_kappa;
-            grad_f[4 * n + ip1] -= d_kappa;
         }
         true
     }
@@ -596,7 +587,7 @@ impl ConstrainedProblem for RacingLineProblem {
     }
 
     fn num_constraint_jacobian_non_zeros(&self) -> usize {
-        19 * self.n
+        18 * self.n
     }
 
     fn constraint_bounds(&self, g_l: &mut [Number], g_u: &mut [Number]) -> bool {
@@ -626,27 +617,25 @@ impl ConstrainedProblem for RacingLineProblem {
 
         for i in 0..n {
             let ip1 = self.next(i);
-            g[i] = xs[ip1] - xs[i] - (us[i] + us[ip1]) * self.ds;
+            g[i] = xs[ip1] - xs[i]
+                - self.ds * (us[i] * self.h(ns[i], i) + us[ip1] * self.h(ns[ip1], ip1));
         }
         for i in 0..n {
             let ip1 = self.next(i);
-            let h_i = self.h(ns[i], i);
-            let h_ip1 = self.h(ns[ip1], ip1);
-            g[n + i] = ns[ip1] - ns[i] - self.ds / 2.0 * (h_i * xis[i] + h_ip1 * xis[ip1]);
+            let h_mid = 0.5 * (self.h(ns[i], i) + self.h(ns[ip1], ip1));
+            g[n + i] = ns[ip1] - ns[i] - self.ds * xis[i] * h_mid;
         }
         for i in 0..n {
-            let ip1 = self.next(i);
-            let h_i = self.h(ns[i], i);
-            let h_ip1 = self.h(ns[ip1], ip1);
-            g[2 * n + i] = xis[ip1] - xis[i]
-                - self.ds / 2.0
-                    * ((kappas[i] * h_i - self.curvature[i]) + (kappas[ip1] * h_ip1 - self.curvature[ip1]));
+            let im1 = self.prev(i);
+            g[2 * n + i] = xis[i] - xis[im1]
+                - self.ds * (kappas[i] * self.h(ns[i], i) - self.curvature[i]);
         }
         for i in 0..n {
             let g_eff = self.g_eff(xs[i]);
             let a_lat = xs[i] * kappas[i];
+            let w = us[i] + self.c_d[i] * xs[i]; // tire longitudinal force, drag added back
             g[3 * n + i] = (a_lat / (self.params.mu_lat * g_eff)).powi(2)
-                + (us[i] / (self.params.mu_lon * g_eff)).powi(2);
+                + (w / (self.params.mu_lon * g_eff)).powi(2);
         }
         for i in 0..n {
             g[4 * n + i] =
@@ -659,7 +648,7 @@ impl ConstrainedProblem for RacingLineProblem {
         let n = self.n;
         let mut k = 0;
 
-        // x-defect row i: d/dx_i, d/dx_{i+1}, d/du_i, d/du_{i+1}
+        // x-defect row i: d/dx_i, d/dx_{i+1}, d/du_i, d/du_{i+1}, d/dn_i, d/dn_{i+1}
         for i in 0..n {
             let ip1 = self.next(i);
             let row = i as Index;
@@ -667,26 +656,25 @@ impl ConstrainedProblem for RacingLineProblem {
             irow[k] = row; jcol[k] = ip1 as Index; k += 1;
             irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
             irow[k] = row; jcol[k] = (n + ip1) as Index; k += 1;
+            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
+            irow[k] = row; jcol[k] = (2 * n + ip1) as Index; k += 1;
         }
-        // n-defect row n+i: d/dn_i, d/dxi_i, d/dn_{i+1}, d/dxi_{i+1}
+        // n-defect row n+i: d/dn_i, d/dn_{i+1}, d/dxi_i
         for i in 0..n {
             let ip1 = self.next(i);
             let row = (n + i) as Index;
             irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (3 * n + i) as Index; k += 1;
             irow[k] = row; jcol[k] = (2 * n + ip1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (3 * n + ip1) as Index; k += 1;
+            irow[k] = row; jcol[k] = (3 * n + i) as Index; k += 1;
         }
-        // xi-defect row 2n+i: d/dxi_i, d/dxi_{i+1}, d/dn_i, d/dkappa_i, d/dn_{i+1}, d/dkappa_{i+1}
+        // xi-defect row 2n+i: d/dxi_i, d/dxi_{i-1}, d/dkappa_i, d/dn_i
         for i in 0..n {
-            let ip1 = self.next(i);
+            let im1 = self.prev(i);
             let row = (2 * n + i) as Index;
             irow[k] = row; jcol[k] = (3 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (3 * n + ip1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
+            irow[k] = row; jcol[k] = (3 * n + im1) as Index; k += 1;
             irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + ip1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (4 * n + ip1) as Index; k += 1;
+            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
         }
         // ellipse row 3n+i: d/dx_i, d/du_i, d/dkappa_i
         for i in 0..n {
@@ -706,6 +694,7 @@ impl ConstrainedProblem for RacingLineProblem {
 
     fn constraint_jacobian_values(&self, x: &[Number], _new_x: bool, vals: &mut [Number]) -> bool {
         let n = self.n;
+        let ds = self.ds;
         let xs = &x[0..n];
         let us = &x[n..2 * n];
         let ns = &x[2 * n..3 * n];
@@ -713,42 +702,41 @@ impl ConstrainedProblem for RacingLineProblem {
         let kappas = &x[4 * n..5 * n];
         let mut k = 0;
 
-        for _ in 0..n {
+        for i in 0..n {
+            let ip1 = self.next(i);
             vals[k] = -1.0; k += 1;
             vals[k] = 1.0; k += 1;
-            vals[k] = -self.ds; k += 1;
-            vals[k] = -self.ds; k += 1;
+            vals[k] = -ds * self.h(ns[i], i); k += 1;
+            vals[k] = -ds * self.h(ns[ip1], ip1); k += 1;
+            vals[k] = ds * us[i] * self.curvature[i]; k += 1;
+            vals[k] = ds * us[ip1] * self.curvature[ip1]; k += 1;
         }
         for i in 0..n {
             let ip1 = self.next(i);
-            let h_i = self.h(ns[i], i);
-            let h_ip1 = self.h(ns[ip1], ip1);
-            vals[k] = -1.0 + self.ds / 2.0 * self.curvature[i] * xis[i]; k += 1;
-            vals[k] = -self.ds / 2.0 * h_i; k += 1;
-            vals[k] = 1.0 + self.ds / 2.0 * self.curvature[ip1] * xis[ip1]; k += 1;
-            vals[k] = -self.ds / 2.0 * h_ip1; k += 1;
+            let h_mid = 0.5 * (self.h(ns[i], i) + self.h(ns[ip1], ip1));
+            vals[k] = -1.0 + 0.5 * ds * xis[i] * self.curvature[i]; k += 1;
+            vals[k] = 1.0 + 0.5 * ds * xis[i] * self.curvature[ip1]; k += 1;
+            vals[k] = -ds * h_mid; k += 1;
         }
         for i in 0..n {
-            let ip1 = self.next(i);
-            let h_i = self.h(ns[i], i);
-            let h_ip1 = self.h(ns[ip1], ip1);
-            vals[k] = -1.0; k += 1;
             vals[k] = 1.0; k += 1;
-            vals[k] = self.ds / 2.0 * kappas[i] * self.curvature[i]; k += 1;
-            vals[k] = -self.ds / 2.0 * h_i; k += 1;
-            vals[k] = self.ds / 2.0 * kappas[ip1] * self.curvature[ip1]; k += 1;
-            vals[k] = -self.ds / 2.0 * h_ip1; k += 1;
+            vals[k] = -1.0; k += 1;
+            vals[k] = -ds * self.h(ns[i], i); k += 1;
+            vals[k] = ds * kappas[i] * self.curvature[i]; k += 1;
         }
-        // Ellipse E(x,u,kappa) = kappa^2*x^2/(L^2*g^2) + u^2/(M^2*g^2), g = G + c_l*x.
+        // Ellipse E(x,u,kappa) = kappa^2*x^2/(L^2*g^2) + w^2/(M^2*g^2), g = G + c_l*x,
+        // w = u + c_d*x (see the module comment).
         for i in 0..n {
             let l = self.params.mu_lat;
             let m = self.params.mu_lon;
             let c_l = self.params.c_l;
+            let c_d = self.c_d[i];
             let kap = kappas[i];
             let g_eff = self.g_eff(xs[i]);
-            let de_dx = (2.0 / g_eff.powi(3))
-                * (kap.powi(2) * xs[i] * G / l.powi(2) - c_l * us[i].powi(2) / m.powi(2));
-            let de_du = 2.0 * us[i] / (m.powi(2) * g_eff.powi(2));
+            let w = us[i] + c_d * xs[i];
+            let de_dx = 2.0 * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(3))
+                + 2.0 * w * (c_d * g_eff - w * c_l) / (m.powi(2) * g_eff.powi(3));
+            let de_du = 2.0 * w / (m.powi(2) * g_eff.powi(2));
             let de_dkappa = 2.0 * xs[i].powi(2) * kap / (l.powi(2) * g_eff.powi(2));
             vals[k] = de_dx; k += 1;
             vals[k] = de_du; k += 1;
@@ -762,22 +750,18 @@ impl ConstrainedProblem for RacingLineProblem {
         true
     }
 
-    // Lower-triangular sparsity, 11 entries per point i (see module doc comment for the new
-    // pairs beyond MinTimeProblem's (x,x)/(u,u)/(u,x)): the two new dynamics defects are
-    // bilinear in their own-index variables, so every new pair stays local to one point,
-    // same as the existing ellipse/power/objective terms. (xi_i,xi_i) and (kappa_i,kappa_i)
-    // are the regularization terms' diagonal contribution (see XI_REG_WEIGHT); the last two
-    // entries are the regularization terms' cross-point coupling between i and next(i) --
-    // the one place this problem needs an off-diagonal (i, i+1) block.
+    // Lower-triangular sparsity, 9 entries per node i -- every pair is local to node i except
+    // (xi_i, n_{i+1}), and row >= col holds for all of them since the variable blocks are
+    // ordered x < u < n < xi < kappa.
     fn num_hessian_non_zeros(&self) -> usize {
-        11 * self.n
+        10 * self.n
     }
 
     fn hessian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
         let n = self.n;
         for i in 0..n {
             let ip1 = self.next(i);
-            let k = 11 * i;
+            let k = 10 * i;
             irow[k] = i as Index; jcol[k] = i as Index; // (x_i, x_i)
             irow[k + 1] = (n + i) as Index; jcol[k + 1] = (n + i) as Index; // (u_i, u_i)
             irow[k + 2] = (n + i) as Index; jcol[k + 2] = i as Index; // (u_i, x_i)
@@ -785,15 +769,9 @@ impl ConstrainedProblem for RacingLineProblem {
             irow[k + 4] = (4 * n + i) as Index; jcol[k + 4] = i as Index; // (kappa_i, x_i)
             irow[k + 5] = (2 * n + i) as Index; jcol[k + 5] = i as Index; // (n_i, x_i)
             irow[k + 6] = (3 * n + i) as Index; jcol[k + 6] = (2 * n + i) as Index; // (xi_i, n_i)
-            irow[k + 7] = (4 * n + i) as Index; jcol[k + 7] = (2 * n + i) as Index; // (kappa_i, n_i)
-            irow[k + 8] = (3 * n + i) as Index; jcol[k + 8] = (3 * n + i) as Index; // (xi_i, xi_i)
-            // (xi_i, xi_{i+1}) cross term -- order by variable index so row >= col holds
-            // even across the wraparound segment (i=n-1, ip1=0, where xi_0's index is
-            // smaller than xi_{n-1}'s).
-            let (xi_a, xi_b) = (3 * n + i, 3 * n + ip1);
-            irow[k + 9] = xi_a.max(xi_b) as Index; jcol[k + 9] = xi_a.min(xi_b) as Index;
-            let (kap_a, kap_b) = (4 * n + i, 4 * n + ip1);
-            irow[k + 10] = kap_a.max(kap_b) as Index; jcol[k + 10] = kap_a.min(kap_b) as Index;
+            irow[k + 7] = (3 * n + i) as Index; jcol[k + 7] = (2 * n + ip1) as Index; // (xi_i, n_{i+1})
+            irow[k + 8] = (4 * n + i) as Index; jcol[k + 8] = (2 * n + i) as Index; // (kappa_i, n_i)
+            irow[k + 9] = (2 * n + i) as Index; jcol[k + 9] = (n + i) as Index; // (n_i, u_i)
         }
         true
     }
@@ -807,56 +785,58 @@ impl ConstrainedProblem for RacingLineProblem {
         vals: &mut [Number],
     ) -> bool {
         let n = self.n;
+        let ds = self.ds;
         let xs = &x[0..n];
         let us = &x[n..2 * n];
         let kappas = &x[4 * n..5 * n];
 
         for i in 0..n {
-            let prev_i = self.prev(i);
+            let ip1 = self.next(i);
             let l = self.params.mu_lat;
             let m = self.params.mu_lon;
             let c_l = self.params.c_l;
+            let c_d = self.c_d[i];
             let kap = kappas[i];
             let g_eff = self.g_eff(xs[i]);
+            let w = us[i] + c_d * xs[i];
             let h_i = self.h(x[2 * n + i], i);
 
+            let lambda_x_defect = lambda[i];
+            let lambda_x_defect_prev = lambda[self.prev(i)];
             let lambda_n_defect = lambda[n + i];
             let lambda_xi_defect = lambda[2 * n + i];
             let lambda_ellipse = lambda[3 * n + i];
             let lambda_power = lambda[4 * n + i];
-            let lambda_n_defect_prev = lambda[n + prev_i];
-            let lambda_xi_defect_prev = lambda[2 * n + prev_i];
 
-            let d2f_dx2 = h_i * 0.75 * self.ds * xs[i].powf(-2.5);
-            let d2e_dx2 = -6.0 * c_l * (kap.powi(2) * xs[i] * G / l.powi(2) - c_l * us[i].powi(2) / m.powi(2))
-                / g_eff.powi(4)
-                + 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3));
+            let d2f_dx2 = h_i * 0.75 * ds * xs[i].powf(-2.5);
+            let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
+                - 6.0 * c_l * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(4))
+                + 2.0
+                    * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
+                        - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
+                    / m.powi(2);
             let d2p_dx2 = -0.75 * self.params.p_engine * xs[i].powf(-2.5);
             let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
-            let d2e_dxdu = -4.0 * c_l * us[i] / (m.powi(2) * g_eff.powi(3));
+            let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
+                - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
             let d2e_dkappa2 = 2.0 * xs[i].powi(2) / (l.powi(2) * g_eff.powi(2));
             let d2e_dkappadx = 4.0 * xs[i] * kap / (l.powi(2) * g_eff.powi(2))
                 - 4.0 * xs[i].powi(2) * kap * c_l / (l.powi(2) * g_eff.powi(3));
-            let d2f_dxdn = 0.5 * self.ds * self.curvature[i] * xs[i].powf(-1.5);
-            let d2ndefect_dndxi = self.ds / 2.0 * self.curvature[i] * (lambda_n_defect + lambda_n_defect_prev);
-            let d2xidefect_dndkappa = self.ds / 2.0 * self.curvature[i] * (lambda_xi_defect + lambda_xi_defect_prev);
+            let d2f_dxdn = 0.5 * ds * self.curvature[i] * xs[i].powf(-1.5);
 
-            let k = 11 * i;
-            // Diagonal regularization coefficients are 4*eps, not 2*eps: each point i picks
-            // up a factor of 2 from being the left endpoint of segment i's (xi_i-xi_{i+1})^2
-            // term AND another factor of 2 from being the right endpoint of segment
-            // prev(i)'s -- see the objective_grad comment for the same accounting.
+            let k = 10 * i;
             vals[k] = obj_factor * d2f_dx2 + lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2;
             vals[k + 1] = lambda_ellipse * d2e_du2;
             vals[k + 2] = lambda_ellipse * d2e_dxdu;
-            vals[k + 3] = lambda_ellipse * d2e_dkappa2 + obj_factor * 4.0 * KAPPA_REG_WEIGHT;
+            vals[k + 3] = lambda_ellipse * d2e_dkappa2;
             vals[k + 4] = lambda_ellipse * d2e_dkappadx;
             vals[k + 5] = obj_factor * d2f_dxdn;
-            vals[k + 6] = d2ndefect_dndxi;
-            vals[k + 7] = d2xidefect_dndkappa;
-            vals[k + 8] = obj_factor * 4.0 * XI_REG_WEIGHT;
-            vals[k + 9] = obj_factor * -2.0 * XI_REG_WEIGHT;
-            vals[k + 10] = obj_factor * -2.0 * KAPPA_REG_WEIGHT;
+            vals[k + 6] = lambda_n_defect * 0.5 * ds * self.curvature[i];
+            vals[k + 7] = lambda_n_defect * 0.5 * ds * self.curvature[ip1];
+            vals[k + 8] = lambda_xi_defect * ds * self.curvature[i];
+            // u_i appears in the x-defect starting at i and the one ending at i.
+            vals[k + 9] =
+                (lambda_x_defect + lambda_x_defect_prev) * ds * self.curvature[i];
         }
         true
     }
@@ -866,7 +846,7 @@ impl ConstrainedProblem for RacingLineProblem {
 /// coarse grid solve_min_time uses, plus track-boundary bounds on that offset. drs_s/
 /// drs_open are python_scripts/export_track.py's drs_zones.csv (see solve_min_time) -- pass
 /// empty slices for a track with no DRS data. Returns (velocity profile, lateral offset
-/// profile, lap time, coarse ds).
+/// profile, lap time, coarse ds), or Err if Ipopt didn't converge.
 pub fn solve_racing_line(
     curvature_full: &[f64],
     full_ds: f64,
@@ -877,8 +857,8 @@ pub fn solve_racing_line(
     n_right_full: &[f64],
     drs_s: &[f64],
     drs_open: &[bool],
-) -> (Vec<f64>, Vec<f64>, f64, f64) {
-    let (curvature, ds) = coarsen(curvature_full, full_ds, target_spacing);
+) -> Result<(Vec<f64>, Vec<f64>, f64, f64), String> {
+    let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
     let target_s: Vec<f64> = (0..n).map(|i| i as f64 * ds).collect();
@@ -952,16 +932,12 @@ pub fn solve_racing_line(
     } = ipopt.solve();
 
     println!("Ipopt status: {:?}", status);
+    check_status(status)?;
 
     let velocity: Vec<f64> = solution.primal_variables[0..n].iter().map(|x| x.sqrt()).collect();
     let n_profile: Vec<f64> = solution.primal_variables[2 * n..3 * n].to_vec();
-    // Ipopt's own objective_value includes the xi/kappa regularization terms (see
-    // XI_REG_WEIGHT), which are a solver-internal device to suppress a spurious null-space
-    // mode, not part of the actual lap time -- recompute the true value (matching
-    // MinTimeProblem's objective exactly when n=0) from the returned solution instead of
-    // returning that raw value.
     let lap_time: f64 = (0..n)
         .map(|i| ds * (1.0 - n_profile[i] * curvature_ref[i]) / velocity[i])
         .sum();
-    (velocity, n_profile, lap_time, ds)
+    Ok((velocity, n_profile, lap_time, ds))
 }

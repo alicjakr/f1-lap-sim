@@ -4,6 +4,7 @@ use std::path::Path;
 use f1_lap_sim::{api, optimal, solver, track};
 
 fn main() {
+    // claude --resume 63ed6efc-b52d-40a9-8fcd-0c7b2418847d
     // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
     let track_slug = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
@@ -41,7 +42,8 @@ fn main() {
     // params.c_d (DRS always closed).
     let (drs_s, drs_open) = track::load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
     if mode == "optimal" {
-        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open);
+        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open)
+            .unwrap_or_else(|e| panic!("{}", e));
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;
         println!("Lap time (optimal, objective value): {}:{:06.3}", minutes, seconds);

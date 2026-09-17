@@ -6,11 +6,11 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::optimal::{coarsen_stride, resample_bounds, solve_min_time, solve_racing_line};
+use crate::optimal::{coarsen_periodic, resample_bounds, solve_min_time, solve_racing_line};
 use crate::solver::CarParams;
 use crate::track::{
     fit_periodic_bspline, load_aero_params, load_boundaries, load_drs_zones,
-    load_track_geometry, offset_line, resample, total_length,
+    load_track_geometry, offset_line, resample, total_length, Point,
 };
 
 const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
@@ -142,18 +142,22 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
 
     let (v_final, n_profile, lap_time_s, ds_coarse) = solve_racing_line(
         &curvature, 1.0, &params, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open,
-    );
+    )
+    .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
 
     let mean_abs_n = n_profile.iter().map(|n| n.abs()).sum::<f64>() / n_profile.len() as f64;
     let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
 
     let (_, fixed_line_time_s, _) =
-        solve_min_time(&curvature, 1.0, &params, spacing, &drs_s, &drs_open);
+        solve_min_time(&curvature, 1.0, &params, spacing, &drs_s, &drs_open)
+            .map_err(|e| format!("fixed-line solve for {:?}: {}", track, e))?;
 
-    let stride = coarsen_stride(1.0, spacing);
-    let coarse_points: Vec<_> = resampled.iter().step_by(stride).cloned().collect();
-    let x_ref: Vec<f64> = coarse_points.iter().map(|p| p.x).collect();
-    let y_ref: Vec<f64> = coarse_points.iter().map(|p| p.y).collect();
+    // Same grid the solver used, so index i here lines up with n_profile[i].
+    let xs: Vec<f64> = resampled.iter().map(|p| p.x).collect();
+    let ys: Vec<f64> = resampled.iter().map(|p| p.y).collect();
+    let (x_ref, _) = coarsen_periodic(&xs, 1.0, spacing);
+    let (y_ref, _) = coarsen_periodic(&ys, 1.0, spacing);
+    let coarse_points: Vec<Point> = x_ref.iter().zip(&y_ref).map(|(&x, &y)| Point { x, y }).collect();
     let (x_line, y_line) = offset_line(&coarse_points, &n_profile);
 
     let target_s: Vec<f64> = (0..coarse_points.len()).map(|i| i as f64 * ds_coarse).collect();
