@@ -122,7 +122,7 @@ function renderTrack(result) {
       .attr('stroke-width', 3)
       .on('mousemove', (event) => {
         tooltip.style('opacity', 1)
-          .html(`s = ${result.s[i].toFixed(0)} m<br>speed = ${result.speed_kmh[i].toFixed(1)} km/h<br>n = ${result.n_profile[i].toFixed(2)} m`)
+          .html(`Distance ${result.s[i].toFixed(0)} m<br>Speed ${result.speed_kmh[i].toFixed(1)} km/h<br>Line offset ${result.n_profile[i].toFixed(2)} m`)
           .style('left', (event.pageX + 12) + 'px')
           .style('top', (event.pageY - 12) + 'px');
       })
@@ -146,7 +146,7 @@ function renderTrack(result) {
   const zoom = d3.zoom().scaleExtent([0.5, 20]).on('zoom', (event) => {
     g.attr('transform', event.transform);
   });
-  trackSvg.call(zoom);
+  trackSvg.call(zoom).call(zoom.transform, d3.zoomIdentity);
 
   // Fixed overlay (outside the zoomable/pannable `g`) so it stays put while exploring the map.
   renderSpeedLegend(trackSvg, width, height, colorScale, d3.extent(result.speed_kmh));
@@ -241,7 +241,7 @@ function renderSpeedTrace(result) {
     if (i < 0 || i >= result.s.length) return;
     crosshair.attr('x1', x(result.s[i])).attr('x2', x(result.s[i])).style('opacity', 1);
     tooltip.style('opacity', 1)
-      .html(`s = ${result.s[i].toFixed(0)} m<br>speed = ${result.speed_kmh[i].toFixed(1)} km/h`)
+      .html(`Distance ${result.s[i].toFixed(0)} m<br>Speed ${result.speed_kmh[i].toFixed(1)} km/h`)
       .style('left', (event.pageX + 12) + 'px')
       .style('top', (event.pageY - 12) + 'px');
   }).on('mouseleave', () => {
@@ -269,7 +269,11 @@ function renderStats(result) {
 }
 
 function renderError(message) {
-  statsEl.innerHTML = `<div class="error">${message}</div>`;
+  statsEl.textContent = '';
+  const div = document.createElement('div');
+  div.className = 'error';
+  div.textContent = message;
+  statsEl.appendChild(div);
   trackSvg.selectAll('*').remove();
   speedSvg.selectAll('*').remove();
 }

@@ -1,6 +1,6 @@
 """
 Derive per-track (c_l, c_d) aero coefficients from a track's own real FastF1 telemetry,
-instead of guessing which of three fixed tiers (main.rs's HIGH/MED/LOW_DOWNFORCE) a circuit
+instead of guessing which of three fixed tiers (api.rs's HIGH/MED/LOW_DOWNFORCE) a circuit
 belongs to. See results/DISCUSSION.md for why (the 3-tier system's validation gap) and the
 full validation history, including the rejected joint mu_lat/c_l regression.
 
@@ -32,7 +32,7 @@ Usage:
   python derive_downforce.py --track monaco
 
 Requires data/<slug>_track_geometry.csv and data/<slug>_reference_lap.csv (export_track.py).
-Outputs data/<slug>_aero_params.csv (c_l, c_d), read by src/main.rs (track::load_aero_params)
+Outputs data/<slug>_aero_params.csv (c_l, c_d), read by src/api.rs (track::load_aero_params)
 in place of the 3-tier fallback when present.
 """
 
@@ -45,7 +45,7 @@ from scipy.signal import savgol_filter
 MU_LAT = 1.6
 G = 9.81
 P_ENGINE = 1015.0
-DRS_DRAG_REDUCTION = 0.88  # matches main.rs's DRS_DRAG_REDUCTION
+DRS_DRAG_REDUCTION = 0.88  # matches api.rs's DRS_DRAG_REDUCTION
 
 MIN_APEX_SPEED_KMH = 150.0
 MIN_CURVATURE = 0.008
@@ -95,7 +95,7 @@ if not c_l_samples:
     raise ValueError(
         f"{slug}: no qualifying quasi-steady-state cornering points found -- "
         "can't derive c_l for this track (check MIN_APEX_SPEED_KMH/MIN_CURVATURE against "
-        "its real corner speeds, or fall back to the 3-tier system in main.rs)"
+        "its real corner speeds, or fall back to the 3-tier system in api.rs)"
     )
 c_l = float(np.median(c_l_samples))
 

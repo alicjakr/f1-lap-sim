@@ -13,9 +13,10 @@ use crate::track::{
     load_track_geometry, offset_line, resample, total_length, Point,
 };
 
-const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012); // Cd=1.05, Cl=3.05
-const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010); // Cd=0.85, Cl=2.47
-const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082); // Cd=0.70, Cl=2.03
+// (c_l, c_d), per unit mass -- Cl/Cd of 3.05/1.05, 2.47/0.85 and 2.03/0.70 respectively.
+const HIGH_DOWNFORCE: (f64, f64) = (0.0036, 0.0012);
+const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);
+const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082);
 const DRS_DRAG_REDUCTION: f64 = 0.88;
 
 // Real 2018 qualifying pole time per track (session.laps.pick_fastest() in Q, fetched via
@@ -96,6 +97,43 @@ pub fn load_car_params(track: &str) -> CarParams {
     }
 }
 
+/// Resample step for the fitted centerline; the solvers coarsen from this.
+pub const RESAMPLE_DS_M: f64 = 1.0;
+
+/// One B-spline control point per this much track: far fewer than the raw GPS sample
+/// count, so the fitted curve is structurally incapable of reproducing point-to-point
+/// GPS noise.
+const CONTROL_POINT_SPACING_M: f64 = 12.0;
+
+/// Roughness penalty weight for the same fit (see track::fit_periodic_bspline).
+const SMOOTHING_LAMBDA: f64 = 1.0;
+
+pub struct TrackCurvature {
+    pub resampled: Vec<Point>,
+    pub curvature: Vec<f64>,
+    pub input_points: usize,
+    pub control_points: usize,
+}
+
+/// Loads a track's driven centerline and fits/resamples it into the curvature array both
+/// solvers run on. Shared so the CLI and the web server fit the same curve the same way.
+pub fn load_track_curvature(track: &str) -> Result<TrackCurvature, String> {
+    let geometry_path = format!("data/{}_track_geometry.csv", track);
+    let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path))
+        .map_err(|e| format!("failed to load track geometry for {:?}: {}", track, e))?;
+    let length = total_length(&track_geometry, &t);
+    let control_points = (length / CONTROL_POINT_SPACING_M).round() as usize;
+    let smoother =
+        fit_periodic_bspline(&track_geometry, &t, length, control_points, SMOOTHING_LAMBDA);
+    let (resampled, curvature) = resample(&smoother, RESAMPLE_DS_M);
+    Ok(TrackCurvature {
+        resampled,
+        curvature,
+        input_points: track_geometry.len(),
+        control_points,
+    })
+}
+
 #[derive(Serialize)]
 pub struct RacingLineResult {
     pub track: String,
@@ -122,16 +160,11 @@ pub struct RacingLineResult {
 /// offset solve, fixed-line comparison) -- the same steps main.rs's "racingline" mode runs,
 /// extracted so both the CLI and the web server call the exact same code.
 pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLineResult, String> {
-    let geometry_path = format!("data/{}_track_geometry.csv", track);
     let boundaries_path = format!("data/{}_track_boundaries.csv", track);
     let drs_zones_path = format!("data/{}_drs_zones.csv", track);
 
-    let (track_geometry, t) = load_track_geometry(Path::new(&geometry_path))
-        .map_err(|e| format!("failed to load track geometry for {:?}: {}", track, e))?;
-    let length = total_length(&track_geometry, &t);
-    let control_points = (length / 12.0).round() as usize;
-    let smoother = fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
-    let (resampled, curvature) = resample(&smoother, 1.0);
+    let geometry = load_track_curvature(track)?;
+    let (resampled, curvature) = (geometry.resampled, geometry.curvature);
 
     let (bound_s, n_left, n_right) = load_boundaries(Path::new(&boundaries_path))
         .map_err(|e| format!("failed to load track boundaries for {:?}: {}", track, e))?;
@@ -141,7 +174,7 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
         load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
 
     let (v_final, n_profile, lap_time_s, ds_coarse) = solve_racing_line(
-        &curvature, 1.0, &params, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open,
+        &curvature, RESAMPLE_DS_M, &params, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open,
     )
     .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
 
@@ -149,14 +182,14 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
     let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
 
     let (_, fixed_line_time_s, _) =
-        solve_min_time(&curvature, 1.0, &params, spacing, &drs_s, &drs_open)
+        solve_min_time(&curvature, RESAMPLE_DS_M, &params, spacing, &drs_s, &drs_open)
             .map_err(|e| format!("fixed-line solve for {:?}: {}", track, e))?;
 
     // Same grid the solver used, so index i here lines up with n_profile[i].
     let xs: Vec<f64> = resampled.iter().map(|p| p.x).collect();
     let ys: Vec<f64> = resampled.iter().map(|p| p.y).collect();
-    let (x_ref, _) = coarsen_periodic(&xs, 1.0, spacing);
-    let (y_ref, _) = coarsen_periodic(&ys, 1.0, spacing);
+    let (x_ref, _) = coarsen_periodic(&xs, RESAMPLE_DS_M, spacing);
+    let (y_ref, _) = coarsen_periodic(&ys, RESAMPLE_DS_M, spacing);
     let coarse_points: Vec<Point> = x_ref.iter().zip(&y_ref).map(|(&x, &y)| Point { x, y }).collect();
     let (x_line, y_line) = offset_line(&coarse_points, &n_profile);
 

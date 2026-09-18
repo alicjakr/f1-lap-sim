@@ -5,13 +5,14 @@ use std::path::Path;
 
 const G: f64 = 9.81;
 
+#[derive(Clone)]
 pub struct CarParams {
     pub mu_lat: f64,     // lateral friction coefficient
     pub mu_lon: f64,     // longitudinal friction coefficient (accel + braking)
     pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
     pub c_d: f64,        // drag coefficient per unit mass (m⁻¹), DRS closed
     pub c_d_drs: f64,    // drag coefficient per unit mass (m⁻¹), DRS open (lower than c_d)
-    pub p_engine: f64,   // engine power
+    pub p_engine: f64,   // engine power per unit mass (W/kg)
 }
 
 
@@ -67,7 +68,7 @@ pub fn forward_pass(curvature: &[f64], v_backward: &[f64], params: &CarParams, d
         let g_eff = G + params.c_l * v[i-1].powi(2);
         let a_lat = v[i-1].powi(2) * curvature[i-1].abs();
         let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
-        let a_lon = (params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt()).max(params.mu_lon * g_eff * 0.1);
+        let a_lon = params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt();
         let a_available = (a_lon.min(params.p_engine / v[i-1]) - params.c_d * v[i-1].powi(2)).max(0.0);
         v[i] = v[i].min((v[i-1].powi(2) + 2.0 * a_available * ds).sqrt())
     }

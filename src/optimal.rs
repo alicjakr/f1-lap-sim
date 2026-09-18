@@ -365,14 +365,7 @@ pub fn solve_min_time(
 
     let problem = MinTimeProblem {
         curvature,
-        params: CarParams {
-            mu_lat: params.mu_lat,
-            mu_lon: params.mu_lon,
-            c_l: params.c_l,
-            c_d: params.c_d,
-            c_d_drs: params.c_d_drs,
-            p_engine: params.p_engine,
-        },
+        params: params.clone(),
         c_d,
         ds,
         n,
@@ -895,14 +888,7 @@ pub fn solve_racing_line(
 
     let problem = RacingLineProblem {
         curvature,
-        params: CarParams {
-            mu_lat: params.mu_lat,
-            mu_lon: params.mu_lon,
-            c_l: params.c_l,
-            c_d: params.c_d,
-            c_d_drs: params.c_d_drs,
-            p_engine: params.p_engine,
-        },
+        params: params.clone(),
         c_d,
         ds,
         n,

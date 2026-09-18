@@ -4,7 +4,6 @@ use std::path::Path;
 use f1_lap_sim::{api, optimal, solver, track};
 
 fn main() {
-    // claude --resume 63ed6efc-b52d-40a9-8fcd-0c7b2418847d
     // Track slug, e.g. "singapore" or "suzuka" — matches the <slug>_ prefix that
     // python_scripts/export_track.py writes, so both tracks' data can coexist under data/.
     let track_slug = env::args().nth(1).unwrap_or_else(|| "singapore".to_string());
@@ -13,23 +12,18 @@ fn main() {
     let mode = env::args().nth(2).unwrap_or_else(|| "racingline".to_string());
     // Only used in "optimal"/"racingline" modes: target collocation-point spacing in meters.
     let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(25.0);
-    let geometry_path = format!("data/{}_track_geometry.csv", track_slug);
     let curvature_debug_path = format!("data/{}_curvature_debug.csv", track_slug);
     let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track_slug);
     let simulated_lap_racingline_path = format!("data/{}_simulated_lap_racingline.csv", track_slug);
     let racingline_xy_path = format!("data/{}_racingline_path.csv", track_slug);
     let drs_zones_path = format!("data/{}_drs_zones.csv", track_slug);
 
-    let (track_geometry, t) = track::load_track_geometry(Path::new(&geometry_path)).unwrap();
-    let length = track::total_length(&track_geometry, &t);
-    // One control point roughly every 25m: far fewer than the raw GPS point count, so the
-    // fitted curve is structurally incapable of reproducing point-to-point GPS noise.
-    let control_points = (length / 12.0).round() as usize;
-    let smoother = track::fit_periodic_bspline(&track_geometry, &t, length, control_points, 1.0);
-    let (resampled, curvature) = track::resample(&smoother, 1.0);
-    track::export_curvature_csv(&curvature, 1.0, Path::new(&curvature_debug_path)).unwrap();
+    let geometry = api::load_track_curvature(&track_slug).unwrap_or_else(|e| panic!("{}", e));
+    let (resampled, curvature) = (geometry.resampled, geometry.curvature);
+    let ds = api::RESAMPLE_DS_M;
+    track::export_curvature_csv(&curvature, ds, Path::new(&curvature_debug_path)).unwrap();
 
-    println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", track_geometry.len(), control_points, resampled.len(), resampled.len() as f64 * 1.0);
+    println!("Input point count: {}, control points: {}, resampled point count: {}, total track length: {}", geometry.input_points, geometry.control_points, resampled.len(), resampled.len() as f64 * ds);
     println!("Minimum curvature: {}, maximum curvature: {}, average curvature: {}", curvature.iter().cloned().fold(f64::INFINITY, f64::min), curvature.iter().cloned().fold(f64::NEG_INFINITY, f64::max), curvature.iter().sum::<f64>() / curvature.len() as f64);
 
     // Car params (mass/tire/engine + per-circuit aero) -- see api::load_car_params and
@@ -42,7 +36,7 @@ fn main() {
     // params.c_d (DRS always closed).
     let (drs_s, drs_open) = track::load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
     if mode == "optimal" {
-        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, 1.0, &parameters, spacing, &drs_s, &drs_open)
+        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, ds, &parameters, spacing, &drs_s, &drs_open)
             .unwrap_or_else(|e| panic!("{}", e));
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;
