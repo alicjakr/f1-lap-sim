@@ -146,36 +146,83 @@ impl PeriodicBSpline {
 }
 
 
-fn gauss_solve(mut a: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
-    let m = a.len();
-    for col in 0..m {
-        let mut max_row = col;
-        for row in col + 1..m {
-            if a[row][col].abs() > a[max_row][col].abs() {
-                max_row = row;
-            }
-        }
-        a.swap(col, max_row);
-        rhs.swap(col, max_row);
+// The normal matrix (B^T B + lambda D^T D) is symmetric positive definite and banded: a
+// data point's basis touches 4 consecutive control points and the roughness penalty 3, so
+// every entry lies within |i-j| <= BAND (mod m). Stored as one short row per control point
+// with periodic wraparound. Dense Gaussian elimination would be O(m^3), which rules out the
+// closely-spaced knots a P-spline needs to resolve a tight corner.
+const BAND: usize = 3;
 
-        for row in col + 1..m {
-            let factor = a[row][col] / a[col][col];
-            for j in col..m {
-                a[row][j] -= factor * a[col][j];
+struct PeriodicBandMatrix {
+    m: usize,
+    rows: Vec<[f64; 2 * BAND + 1]>,
+}
+
+impl PeriodicBandMatrix {
+    fn new(m: usize) -> Self {
+        PeriodicBandMatrix { m, rows: vec![[0.0; 2 * BAND + 1]; m] }
+    }
+
+    fn add(&mut self, i: usize, j: usize, v: f64) {
+        let m = self.m as isize;
+        let mut d = j as isize - i as isize;
+        if d > m / 2 {
+            d -= m;
+        } else if d < -m / 2 {
+            d += m;
+        }
+        self.rows[i][(d + BAND as isize) as usize] += v;
+    }
+
+    fn mul(&self, x: &[f64], out: &mut [f64]) {
+        for i in 0..self.m {
+            let mut acc = 0.0;
+            for (k, coeff) in self.rows[i].iter().enumerate() {
+                acc += coeff * x[(i + self.m + k - BAND) % self.m];
             }
-            rhs[row] -= factor * rhs[col];
+            out[i] = acc;
         }
     }
+}
+
+// Jacobi-preconditioned conjugate gradient.
+fn cg_solve(a: &PeriodicBandMatrix, rhs: &[f64]) -> Vec<f64> {
+    let m = rhs.len();
+    let inv_diag: Vec<f64> = (0..m).map(|i| 1.0 / a.rows[i][BAND]).collect();
+    let dot = |u: &[f64], v: &[f64]| u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>();
 
     let mut x = vec![0.0; m];
-    for i in (0..m).rev() {
-        x[i] = rhs[i];
-        for j in (i + 1)..m {
-            x[i] -= a[i][j] * x[j];
-        }
-        x[i] /= a[i][i];
-    }
+    let mut r = rhs.to_vec();
+    let mut z: Vec<f64> = r.iter().zip(&inv_diag).map(|(ri, d)| ri * d).collect();
+    let mut p = z.clone();
+    let mut rz = dot(&r, &z);
+    let mut ap = vec![0.0; m];
+    let tol = 1e-12 * dot(rhs, rhs).sqrt().max(1.0);
 
+    for _ in 0..20 * m {
+        a.mul(&p, &mut ap);
+        let pap = dot(&p, &ap);
+        if pap <= 0.0 {
+            break;
+        }
+        let alpha = rz / pap;
+        for i in 0..m {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        if dot(&r, &r).sqrt() < tol {
+            break;
+        }
+        for i in 0..m {
+            z[i] = r[i] * inv_diag[i];
+        }
+        let rz_next = dot(&r, &z);
+        let beta = rz_next / rz;
+        rz = rz_next;
+        for i in 0..m {
+            p[i] = z[i] + beta * p[i];
+        }
+    }
     x
 }
 
@@ -188,7 +235,7 @@ fn gauss_solve(mut a: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Vec<f64> {
 pub fn fit_periodic_bspline(points: &[Point], t: &[f64], length: f64, m: usize, lambda: f64) -> PeriodicBSpline {
     let h = length / m as f64;
 
-    let mut btb = vec![vec![0.0; m]; m];
+    let mut btb = PeriodicBandMatrix::new(m);
     let mut btx = vec![0.0; m];
     let mut bty = vec![0.0; m];
 
@@ -209,7 +256,7 @@ pub fn fit_periodic_bspline(points: &[Point], t: &[f64], length: f64, m: usize, 
             btx[cols[a]] += b[a] * p.x;
             bty[cols[a]] += b[a] * p.y;
             for bb in 0..4 {
-                btb[cols[a]][cols[bb]] += b[a] * b[bb];
+                btb.add(cols[a], cols[bb], b[a] * b[bb]);
             }
         }
     }
@@ -220,13 +267,13 @@ pub fn fit_periodic_bspline(points: &[Point], t: &[f64], length: f64, m: usize, 
         let coeffs = [1.0, -2.0, 1.0];
         for a in 0..3 {
             for b in 0..3 {
-                btb[idxs[a]][idxs[b]] += lambda * coeffs[a] * coeffs[b];
+                btb.add(idxs[a], idxs[b], lambda * coeffs[a] * coeffs[b]);
             }
         }
     }
 
-    let cx = gauss_solve(btb.clone(), btx);
-    let cy = gauss_solve(btb, bty);
+    let cx = cg_solve(&btb, &btx);
+    let cy = cg_solve(&btb, &bty);
 
     PeriodicBSpline { cx, cy, m, h, length }
 }
