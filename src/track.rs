@@ -339,7 +339,7 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
 
 // Reads python_scripts/derive_downforce.py's output: one row, c_l,c_d -- per-track aero
 // coefficients derived from that track's own real telemetry (apex lateral acceleration,
-// top speed), in place of main.rs's 3-tier HIGH/MED/LOW_DOWNFORCE guess.
+// top speed), in place of api.rs's 3-tier HIGH/MED/LOW_DOWNFORCE guess.
 pub fn load_aero_params(path: &Path) -> Result<(f64, f64), Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
     let mut lines = reader.lines();
