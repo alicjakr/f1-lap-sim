@@ -416,3 +416,186 @@ By this point three distinct algorithms existed and overlapped: the original two
 - No tire degradation, fuel-load burn-off, or track-evolution modeling — reasonable for a single qualifying lap (fresh tires, near-empty fuel), same idealization flagged since V1.
 - No ERS energy-budget state (V5's deferred item) — still open, same reasoning as before.
 - The 6 tracks outside the working set (above) are accepted limitations, not active problems.
+
+---
+
+---
+
+# V7 — Auditing the Solver: Three Formulation Errors, a Regularization That Never Worked, and the Limit of a Point Mass
+
+Not a new feature: a full correctness pass over the repo (code, docs, physics), triggered by
+nothing more than "check whether this is right". It found three real errors in the
+optimal-control formulation, a numerical artifact the V6 regularization was pricing rather
+than removing, and — after the fixes — the uncomfortable result that V6's headline +0.9%
+agreement had been two errors cancelling.
+
+## Three formulation errors, and one silent failure mode
+
+**Drag wasn't counted in the grip limit.** `u` is the car's *net* longitudinal acceleration
+— the dynamics (`dx/ds = 2u`) and the power ceiling (`u ≤ p_engine/√x − c_d·x`) both require
+that reading. But the friction ellipse used `u` directly as the tire's longitudinal force,
+when the tires actually supply `u + c_d·x`. Under braking, drag decelerates the car for
+free, and the solver wasn't crediting it: at 300 km/h that's ~7 m/s² unaccounted for against
+~48 m/s² of tire grip, i.e. braking understated by ~14% at the start of a high-speed braking
+zone. The two-pass warm start (`backward_pass`) had always had this right, so the two
+solvers had been running subtly different physics. Fixing it moved fixed-line lap times by
+−0.05 to −0.21 s on most tracks (a couple went slightly the other way, since the
+acceleration side gets *tighter* by the same term).
+
+**The racing line's speed equation integrated over the wrong distance.** `RacingLineProblem`
+inherited `x[i+1] − x[i] = ds·(u_i + u_{i+1})` unchanged from `MinTimeProblem`, but the
+collocation grid steps along the *reference* line while the car covers `h·ds` of its own
+path per step. The lap-time integrand already carried that `h`; the speed equation didn't,
+so on the inside of a corner the car banked the speed change of a full step while being
+charged the time of a shorter one. Worth +0.02 to +0.33 s once corrected — second-order, as
+expected, but free to fix.
+
+**Every lap was modelled slightly too long.** `coarsen` took every k-th point of the 1 m
+array, which leaves the wrap-around segment back to the start shorter than the rest while
+the periodic collocation still treats it as a full `ds`. Measured at 25 m spacing: +22 m on
+Red Bull Ring, ~+20 m on Monaco, Silverstone, Shanghai and Monza — about 0.3 s, the same
+size as several entries in V6's validation table. Replaced with an exactly uniform periodic
+grid (`m = round(L/target)` points spaced `L/m`).
+
+**A non-converged solve was reported as a result.** Ipopt's status was printed and then
+ignored, so `InfeasibleProblemDetected` still returned numbers: Bahrain's unusable boundary
+data produced a confident 2:34 lap. Both solvers now return `Err`.
+
+All Jacobian and Hessian entries were re-derived and checked against Ipopt's own
+`derivative_test` at several perturbation sizes — the remaining flagged entries shrink as
+the step grows (rounding noise), and the one that persists scales linearly with it
+(one-sided finite-difference truncation), which is what a *correct* analytic derivative
+looks like.
+
+## The checkerboard artifact was priced, not removed
+
+V6 added `XI_REG_WEIGHT`/`KAPPA_REG_WEIGHT` to suppress an alternating ξ/κ null-space mode,
+and validated the fix by pinning track width to ~0 and checking that the racing line
+reproduces `MinTimeProblem`. That check passed — because pinning `n` to *exactly* zero also
+removes the freedom the artifact needs. Pin the width to ±1 cm instead, which cannot buy
+more than a few hundredths of a second of real lap time, and the racing line came out
+**0.8–1.2 s faster** than the fixed line. The regularization had made the mode expensive,
+not impossible, and its cost scales with grid spacing, so finer grids leaked more, not less.
+
+Dumping the solution confirmed the mechanism exactly: κ alternating ±0.01 around κ_ref from
+one point to the next, lowered at the speed-limiting nodes (Monaco's hairpin, κ 0.094 →
+0.084) and raised where grip was spare.
+
+The cure is structural rather than another weight. ξ now lives on the *segments* between
+collocation points instead of on the points themselves (a staggered grid, the same trick
+that kills odd-even decoupling in CFD):
+
+```
+n-defect[i]  = n[i+1] - n[i] - ds*xi[i]*(h[i] + h[i+1])/2
+xi-defect[i] = xi[i] - xi[i-1] - ds*(kappa[i]*h[i] - kappa_ref[i])
+```
+
+ξ is then fixed by n's first differences and κ by ξ's, so with the width pinned there is no
+alternating pattern left to find. Every constraint still couples only neighbouring points,
+which was V6's stated reason for rejecting the second-order Frenet formulation. **Both
+regularization weights, and the calibration they needed, are gone.**
+
+Verification, at 25 m: with width pinned to exactly zero the racing line now equals the
+fixed line to **0.000 s** on Monaco, Monza and Suzuka (previously 0.535 / 0.028 / 0.046);
+with ±1 cm the gap is **0.035–0.081 s**, down from 0.757–1.637 s.
+
+## What the artifact was hiding: the corridor
+
+With the wiggle gone, the solver started using the lateral freedom it had actually been
+given — and that turned out to be nonsense. On Monaco it reached **19.8 m** from the
+reference line, on a track about 12 m wide, because `n_left`/`n_right` carry the ICP
+registration error (up to ~16 m there, already noted in V6) straight into the corridor. Two
+physical constraints now apply when the boundaries are loaded: the car's own half width
+(1.0 m) comes off each side, and since a driven lap was by definition on the track, an
+offset that would put the driven line outside the usable width is registration error and
+gets clamped back to just touching the edge. Monaco's maximum offset drops to 5.0 m and laps
+slow by 0.6–2.8 s.
+
+## The +0.9% was two errors cancelling
+
+| track | racing line | fixed line | real pole | fixed vs pole | racing vs pole |
+|---|---|---|---|---|---|
+| baku | 84.711 | 94.208 | 101.498 | −7.2% | −16.5% |
+| redbullring | 54.094 | 59.940 | 63.130 | −5.1% | −14.3% |
+| hungaroring | 66.060 | 76.343 | 76.666 | −0.4% | −13.8% |
+| shanghai | 84.968 | 90.758 | 91.095 | −0.4% | −6.7% |
+| suzuka | 78.052 | 88.007 | 87.760 | +0.3% | −11.1% |
+| hockenheim | 66.027 | 72.163 | 71.212 | +1.3% | −7.3% |
+| cota | 83.780 | 93.633 | 92.237 | +1.5% | −9.2% |
+| paulricard | 82.526 | 91.867 | 90.029 | +2.0% | −8.3% |
+| spa | 95.936 | 104.061 | 101.501 | +2.5% | −5.5% |
+| monza | 74.974 | 82.312 | 79.119 | +4.0% | −5.2% |
+| monaco | 66.355 | 74.980 | 70.810 | +5.9% | −6.3% |
+| yasmarina | 91.619 | 100.467 | 94.794 | +6.0% | −3.3% |
+| montreal | 70.658 | 75.781 | 70.764 | +7.1% | −0.1% |
+| interlagos | 66.701 | 72.677 | 67.281 | +8.0% | −0.9% |
+| silverstone | 81.458 | 93.085 | 85.892 | +8.4% | −5.2% |
+
+**Fixed line: +2.3% mean (stdev 4.5%). Racing line: −7.6% mean (stdev 4.8%).**
+
+The fixed-line number is credible — a theoretical optimum on a real driver's own line,
+landing a couple of percent slow, with the residual spread explainable by per-track aero and
+telemetry quality. The racing-line number is not: it claims a lap 5–12 s (roughly 10%)
+faster than the fixed line, i.e. that Hamilton left 10% on the table *on his own racing
+line*, with at most 2.5 m of lateral room either side of it. V6's +0.9% agreement was this
+same over-performance held in check by the regularization that was quietly suppressing the
+lateral freedom altogether.
+
+## Five explanations for the remaining gap, and why each is wrong
+
+Each was tested rather than argued, and each is recorded here mostly so it isn't retried:
+
+- **Corridor too wide.** Widening it to a 12 m track (the FIA Grade 1 minimum) makes the
+  racing line *faster* still, −7.6% → −11.5%, about 1 s per extra metre. Not the cause —
+  though it did reveal that every track is running the `DEFAULT_LANES × LANE_WIDTH_M`
+  fallback of 7 m, because essentially no OSM way carries a `lanes` tag. The widths in
+  `*_track_boundaries.csv` are a default, not data.
+- **Registration error.** Checked directly: on Suzuka, Silverstone, Spa and Interlagos the
+  driven-line-to-road-centre offset stays within ±2 m and never leaves the track. Monaco
+  (6.2% of samples) and Baku (13.0%) are localized spikes, not drift — their 5th–95th
+  percentiles are as tight as anyone's. A better global registration would change little.
+- **Grid spacing.** Old and new coarsening converge to the same lap time at 1 m, confirming
+  the uniform-grid fix. But 25 m reads 1–2 s optimistic versus converged, almost always
+  fast, because widely spaced samples skip curvature peaks; 5 m is within ~0.1 s and costs
+  under a second. **The default 25 m is worth revisiting**, independently of everything else
+  here.
+- **Geometry smoothing.** The 12 m / λ=1 spline fit was suspected of over-smoothing corners
+  (an apparent 30–60% under-statement of corner curvature). That suspicion was wrong: it
+  compared against a Savitzky-Golay estimate from raw telemetry that is itself
+  noise-inflated. Judged properly — fit the even-numbered raw samples and the odd-numbered
+  ones separately and compare the two curvature profiles — the current settings sit at 2–4%
+  split-half disagreement with sensible minimum radii (Suzuka 13.8 m, Silverstone 18.3 m),
+  and corner curvature barely moves across the whole stable range. **A warning worth
+  keeping:** ordinary cross-validation on held-out *positions* prefers 6 m knots with λ=0.1,
+  which predicts positions twice as accurately and produces curvature implying 0.3 m radius
+  corners, making Silverstone and Spa infeasible. Position fit and second-derivative quality
+  are not the same objective.
+- **Curvature rate (the point-mass "flick").** A point mass can change path curvature
+  instantly; a real car must build yaw and steering angle first. Capping |κ[i+1] − κ[i]| at
+  the fastest rate the real car demonstrably achieved on its own line is cheap (a linear
+  constraint, no Hessian terms) — and moves lap times by 0.0–0.6 s, leaving −7.4%. The
+  binding bound would have to be far tighter than anything the reference lap justifies, so
+  it wasn't kept.
+
+## Where that leaves it
+
+By elimination the remaining gap is the vehicle model itself. **A point mass pays nothing to
+reposition laterally beyond satisfying the grip limit pointwise** — no yaw inertia, no load
+transfer, no slip angle, no steering dynamics. On a fixed line that costs little, since the
+path's curvature came from a real car in the first place, and `c_l` is derived from that
+same lap's apex data, so the grip model is calibrated to reproduce exactly that case. Free
+the path and the calibration no longer constrains anything: lateral freedom becomes
+available at a price no real car pays. Perantoni & Limebeer, whose curvilinear formulation
+this follows, pair it with a full vehicle model for precisely this reason.
+
+So the honest reading of the current state:
+
+- **`optimal` (fixed line) is the validated model**, at +2.3% against real pole times.
+- **`racingline` is an upper bound** on what line choice alone could buy under a point-mass
+  car — directionally useful, not a lap-time prediction, and currently the CLI default and
+  the only mode the web UI runs.
+
+The natural next step is a single-track (bicycle) model with yaw dynamics — new states for
+yaw rate and sideslip, separate front/rear tire forces — which is a considerably bigger
+change than anything in V1–V7 and the first one where the point-mass assumption itself, in
+place since V1, actually goes away.

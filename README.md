@@ -1,9 +1,15 @@
 # f1-lap-sim
 
 A physics-based F1 lap time simulator. A Rust minimum-time optimal-control solver finds
-the fastest racing line and velocity profile around a track, given real track geometry
-and boundaries. Validated against real 2018 F1 qualifying pole times (mean gap: +0.9%
-across 15 tracks — see `results/DISCUSSION.md`).
+the fastest velocity profile — and optionally the fastest line within the track's real
+width — around a track, given real track geometry and boundaries.
+
+Validated against real 2018 F1 qualifying pole times across 15 tracks: the **fixed-line**
+solver (`optimal` mode) comes out **+2.3% slower than pole on average**. The **free racing
+line** (`racingline` mode, the default) currently comes out ~7.6% *faster* than pole, which
+is not a lap-time prediction — it's an upper bound on what line choice alone could buy a
+point-mass car, which pays nothing for changing direction beyond its grip limit. See V7 in
+`results/DISCUSSION.md` for the audit behind both numbers and what a fix would take.
 
 The pipeline is split in two:
 
@@ -44,15 +50,15 @@ cargo run --release -- <track> [mode] [spacing]
   `<slug>_` prefix under `data/` that the Python export scripts write. Default:
   `singapore`.
 - **`[mode]`** — `racingline` (default) or `optimal`:
-  - `racingline` — the primary solver. Finds a free racing line: both the velocity
-    profile *and* a lateral offset within the track's real width (from
-    `data/<slug>_track_boundaries.csv`), so the solver can straighten corners the way a
-    real driver does. Requires that boundaries file to exist.
+  - `racingline` — finds a free racing line: both the velocity profile *and* a lateral
+    offset within the track's real width (from `data/<slug>_track_boundaries.csv`), so the
+    solver can straighten corners the way a real driver does. Requires that boundaries file
+    to exist. Treat its lap time as an upper bound rather than a prediction (see above).
   - `optimal` — the same minimum-time collocation solver, but pinned to the fixed
-    FastF1-driven centerline (no lateral freedom). Used as a fallback when a track has no
-    boundary data, and as `racingline`'s own correctness baseline (since a zero lateral
-    offset is always a feasible racing-line solution, `racingline`'s lap time can never
-    come out slower than `optimal`'s — printed automatically as a sanity check).
+    FastF1-driven centerline (no lateral freedom). This is the validated mode (+2.3% vs.
+    real pole times). Also serves as `racingline`'s own correctness baseline: since a zero
+    lateral offset is always a feasible racing-line solution, `racingline`'s lap time can
+    never come out slower than `optimal`'s — printed automatically as a sanity check.
 - **`[spacing]`** — target collocation-point spacing in meters. Default: `25.0`. Smaller
   values give a finer solve at higher computational cost.
 
