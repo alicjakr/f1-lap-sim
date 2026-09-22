@@ -10,7 +10,7 @@ use crate::optimal::{coarsen_periodic, resample_bounds, solve_min_time, solve_ra
 use crate::solver::CarParams;
 use crate::track::{
     fit_periodic_bspline, load_aero_params, load_boundaries, load_drs_zones,
-    load_track_geometry, offset_line, resample, total_length, Point,
+    load_reference_lap, load_track_geometry, offset_line, resample, total_length, Point,
 };
 
 // (c_l, c_d), per unit mass -- Cl/Cd of 3.05/1.05, 2.47/0.85 and 2.03/0.70 respectively.
@@ -137,6 +137,38 @@ pub fn load_track_curvature(track: &str) -> Result<TrackCurvature, String> {
     })
 }
 
+/// Peak curvature rate the real car actually achieved on this track, |dkappa/dt| in
+/// 1/(m*s), measured on the solver's own grid from the reference lap's curvature and speed.
+/// A point mass can re-aim itself instantly -- nothing in the grip limit stops it changing
+/// path curvature between one collocation point and the next -- so a free line exploits
+/// flicks no car could drive. This is the cheapest physical bound on that: the car may not
+/// change curvature faster than the real one demonstrably did here. The 99th percentile
+/// rather than the max, since the max is a single telemetry spike. Returns None when the
+/// track has no reference lap, in which case the limit simply isn't applied.
+pub fn steering_rate_limit(track: &str, coarse_curvature: &[f64], ds: f64) -> Option<f64> {
+    let (ref_s, ref_v) = load_reference_lap(Path::new(&format!(
+        "data/{}_reference_lap.csv",
+        track
+    )))
+    .ok()?;
+    if ref_s.len() < 2 {
+        return None;
+    }
+    let n = coarse_curvature.len();
+    let mut rates: Vec<f64> = (0..n)
+        .map(|i| {
+            let d_kappa = (coarse_curvature[(i + 1) % n] - coarse_curvature[i]).abs() / ds;
+            let s = i as f64 * ds;
+            let j = ref_s.partition_point(|&rs| rs <= s).clamp(1, ref_s.len() - 1);
+            let (s_lo, s_hi) = (ref_s[j - 1], ref_s[j]);
+            let f = if s_hi > s_lo { (s - s_lo) / (s_hi - s_lo) } else { 0.0 };
+            d_kappa * (ref_v[j - 1] + f * (ref_v[j] - ref_v[j - 1]))
+        })
+        .collect();
+    rates.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(rates[(n as f64 * 0.99) as usize])
+}
+
 #[derive(Serialize)]
 pub struct RacingLineResult {
     pub track: String,
@@ -176,8 +208,12 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
     let (drs_s, drs_open) =
         load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
 
+    let (coarse_curvature, coarse_ds) = coarsen_periodic(&curvature, RESAMPLE_DS_M, spacing);
+    let omega_max = steering_rate_limit(track, &coarse_curvature, coarse_ds);
+
     let (v_final, n_profile, lap_time_s, ds_coarse) = solve_racing_line(
-        &curvature, RESAMPLE_DS_M, &params, spacing, &bound_s, &n_left, &n_right, &drs_s, &drs_open,
+        &curvature, RESAMPLE_DS_M, &params, spacing, &bound_s, &n_left, &n_right, &drs_s,
+        &drs_open, omega_max,
     )
     .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
 
@@ -185,7 +221,7 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
     let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
 
     let (_, fixed_line_time_s, _) =
-        solve_min_time(&curvature, RESAMPLE_DS_M, &params, spacing, &drs_s, &drs_open)
+        solve_min_time(&curvature, RESAMPLE_DS_M, &params, spacing, &drs_s, &drs_open, omega_max)
             .map_err(|e| format!("fixed-line solve for {:?}: {}", track, e))?;
 
     // Same grid the solver used, so index i here lines up with n_profile[i].

@@ -36,7 +36,9 @@ fn main() {
     // params.c_d (DRS always closed).
     let (drs_s, drs_open) = track::load_drs_zones(Path::new(&drs_zones_path)).unwrap_or_else(|_| (Vec::new(), Vec::new()));
     if mode == "optimal" {
-        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, ds, &parameters, spacing, &drs_s, &drs_open)
+        let (coarse_curvature, coarse_ds) = optimal::coarsen_periodic(&curvature, ds, spacing);
+        let omega_max = api::steering_rate_limit(&track_slug, &coarse_curvature, coarse_ds);
+        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, ds, &parameters, spacing, &drs_s, &drs_open, omega_max)
             .unwrap_or_else(|e| panic!("{}", e));
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;

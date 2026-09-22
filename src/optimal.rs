@@ -76,7 +76,7 @@ struct MinTimeProblem {
     ds: f64,
     n: usize,
     x_min: f64,
-    x_max: f64,
+    x_max: Vec<f64>, // per point: the global cap, tightened by the steering-rate limit
     u_bound: f64,
     initial_x: Vec<f64>,
     initial_u: Vec<f64>,
@@ -100,7 +100,7 @@ impl BasicProblem for MinTimeProblem {
     fn bounds(&self, x_l: &mut [Number], x_u: &mut [Number]) -> bool {
         for i in 0..self.n {
             x_l[i] = self.x_min;
-            x_u[i] = self.x_max;
+            x_u[i] = self.x_max[i];
             x_l[self.n + i] = -self.u_bound;
             x_u[self.n + i] = self.u_bound;
         }
@@ -327,6 +327,7 @@ pub fn solve_min_time(
     target_spacing: f64,
     drs_s: &[f64],
     drs_open: &[bool],
+    omega_max: Option<f64>,
 ) -> Result<(Vec<f64>, f64, f64), String> {
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
@@ -344,7 +345,24 @@ pub fn solve_min_time(
     // Sized off the DRS-open (lower-drag, higher-top-speed) case so a DRS zone's real speed
     // potential isn't clipped by a bound sized off the DRS-closed drag alone.
     let x_max = top_speed_drs(params).powi(2);
-    let initial_x: Vec<f64> = v_init.iter().map(|v| v.powi(2).clamp(x_min, x_max)).collect();
+    // Steering-rate limit (see api::steering_rate_limit). kappa is fixed on this problem, so
+    // "curvature can't change faster than omega_max per second" is just a speed cap at points
+    // where the reference line's curvature changes quickly. Never tightened below x_min --
+    // a cap under the floor would make the problem infeasible rather than slow.
+    let x_max: Vec<f64> = (0..n)
+        .map(|i| {
+            let d_kappa = (curvature[(i + 1) % n] - curvature[i]).abs() / ds;
+            match omega_max {
+                Some(w) if d_kappa > 1e-12 => x_max.min((w / d_kappa).powi(2)).max(x_min),
+                _ => x_max,
+            }
+        })
+        .collect();
+    let initial_x: Vec<f64> = v_init
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.powi(2).clamp(x_min, x_max[i]))
+        .collect();
     let initial_u: Vec<f64> = (0..n)
         .map(|i| {
             let ip1 = (i + 1) % n;
@@ -424,8 +442,11 @@ pub fn solve_min_time(
 // removes that mode structurally, so no regularization is needed.
 //
 // Variables, 5n: [x, u, n, xi, kappa] at offsets 0, n, 2n, 3n, 4n.
-// Constraints, 5n: [x-defect, n-defect, xi-defect, ellipse, power] at row offsets 0, n, 2n,
-// 3n, 4n. Power is unchanged from MinTimeProblem; the ellipse is the same functional form
+// Constraints, 6n: [x-defect, n-defect, xi-defect, ellipse, power, steering-rate] at row
+// offsets 0, n, 2n, 3n, 4n, 5n. The steering-rate rows bound (kappa[i+1]-kappa[i])^2 * x[i]
+// -- i.e. |dkappa/ds|*v, the rate the car re-aims itself in *time* (see
+// api::steering_rate_limit). Without it a point mass changes direction instantly and the
+// free line exploits flicks no car could drive. Power is unchanged from MinTimeProblem; the ellipse is the same functional form
 // with kappa in place of the fixed curvature; the x-defect carries the same h as dt/ds does,
 // so speed changes are integrated over the path actually driven rather than over the
 // reference line. n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly.
@@ -439,6 +460,8 @@ pub fn solve_min_time(
 //   d2(xi-defect[i])/dK_i dn_i     = ds*kappa_ref_i
 //   d2(x-defect)/du_i dn_i         = ds*kappa_ref_i (from the defects both starting and
 //                                    ending at i -- see hessian_values)
+//   d2(rate[i])/dK_i2 = d2(rate[i])/dK_{i+1}2 = 2*x_i,  d2/dK_i dK_{i+1} = -2*x_i
+//   d2(rate[i])/dK_i dx_i = -2*(K_{i+1}-K_i),  d2/dK_{i+1} dx_i = 2*(K_{i+1}-K_i)
 
 /// Linearly interpolates n_left(s)/n_right(s) from the boundary CSV's own arc-length axis
 /// (FastF1's raw Distance channel, via track::load_boundaries) onto the solver's coarse
@@ -494,6 +517,8 @@ struct RacingLineProblem {
     u_bound: f64,
     xi_bound: f64,
     kappa_bound: f64,
+    // (omega_max * ds)^2: bounds (kappa[i+1] - kappa[i])^2 * x[i], i.e. |dkappa/ds|*v.
+    rate_bound_sq: f64,
     n_left: Vec<f64>,
     n_right: Vec<f64>,
     initial_x: Vec<f64>,
@@ -576,11 +601,11 @@ impl BasicProblem for RacingLineProblem {
 
 impl ConstrainedProblem for RacingLineProblem {
     fn num_constraints(&self) -> usize {
-        5 * self.n
+        6 * self.n
     }
 
     fn num_constraint_jacobian_non_zeros(&self) -> usize {
-        18 * self.n
+        21 * self.n
     }
 
     fn constraint_bounds(&self, g_l: &mut [Number], g_u: &mut [Number]) -> bool {
@@ -596,6 +621,8 @@ impl ConstrainedProblem for RacingLineProblem {
             g_u[3 * n + i] = 1.0;
             g_l[4 * n + i] = -1e20; // power ceiling: <= 0
             g_u[4 * n + i] = 0.0;
+            g_l[5 * n + i] = -1e20; // steering rate: (dkappa)^2 * x <= (omega*ds)^2
+            g_u[5 * n + i] = self.rate_bound_sq;
         }
         true
     }
@@ -633,6 +660,10 @@ impl ConstrainedProblem for RacingLineProblem {
         for i in 0..n {
             g[4 * n + i] =
                 us[i] - self.params.p_engine / xs[i].sqrt() + self.c_d[i] * xs[i];
+        }
+        for i in 0..n {
+            let d = kappas[self.next(i)] - kappas[i];
+            g[5 * n + i] = d * d * xs[i];
         }
         true
     }
@@ -681,6 +712,13 @@ impl ConstrainedProblem for RacingLineProblem {
             let row = (4 * n + i) as Index;
             irow[k] = row; jcol[k] = i as Index; k += 1;
             irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
+        }
+        // steering-rate row 5n+i: d/dkappa_i, d/dkappa_{i+1}, d/dx_i
+        for i in 0..n {
+            let row = (5 * n + i) as Index;
+            irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
+            irow[k] = row; jcol[k] = (4 * n + self.next(i)) as Index; k += 1;
+            irow[k] = row; jcol[k] = i as Index; k += 1;
         }
         true
     }
@@ -740,6 +778,12 @@ impl ConstrainedProblem for RacingLineProblem {
             vals[k] = dp_dx; k += 1;
             vals[k] = 1.0; k += 1;
         }
+        for i in 0..n {
+            let d = kappas[self.next(i)] - kappas[i];
+            vals[k] = -2.0 * d * xs[i]; k += 1;
+            vals[k] = 2.0 * d * xs[i]; k += 1;
+            vals[k] = d * d; k += 1;
+        }
         true
     }
 
@@ -747,14 +791,14 @@ impl ConstrainedProblem for RacingLineProblem {
     // (xi_i, n_{i+1}), and row >= col holds for all of them since the variable blocks are
     // ordered x < u < n < xi < kappa.
     fn num_hessian_non_zeros(&self) -> usize {
-        10 * self.n
+        12 * self.n
     }
 
     fn hessian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
         let n = self.n;
         for i in 0..n {
             let ip1 = self.next(i);
-            let k = 10 * i;
+            let k = 12 * i;
             irow[k] = i as Index; jcol[k] = i as Index; // (x_i, x_i)
             irow[k + 1] = (n + i) as Index; jcol[k + 1] = (n + i) as Index; // (u_i, u_i)
             irow[k + 2] = (n + i) as Index; jcol[k + 2] = i as Index; // (u_i, x_i)
@@ -765,6 +809,11 @@ impl ConstrainedProblem for RacingLineProblem {
             irow[k + 7] = (3 * n + i) as Index; jcol[k + 7] = (2 * n + ip1) as Index; // (xi_i, n_{i+1})
             irow[k + 8] = (4 * n + i) as Index; jcol[k + 8] = (2 * n + i) as Index; // (kappa_i, n_i)
             irow[k + 9] = (2 * n + i) as Index; jcol[k + 9] = (n + i) as Index; // (n_i, u_i)
+            // steering rate: (kappa_{i+1}, kappa_i) -- ordered by variable index so row >= col
+            // holds across the wraparound -- and (kappa_i, x_{i-1}) from the defect ending at i.
+            let (kap_a, kap_b) = (4 * n + i, 4 * n + ip1);
+            irow[k + 10] = kap_a.max(kap_b) as Index; jcol[k + 10] = kap_a.min(kap_b) as Index;
+            irow[k + 11] = (4 * n + i) as Index; jcol[k + 11] = self.prev(i) as Index;
         }
         true
     }
@@ -794,8 +843,13 @@ impl ConstrainedProblem for RacingLineProblem {
             let w = us[i] + c_d * xs[i];
             let h_i = self.h(x[2 * n + i], i);
 
+            let prev_i = self.prev(i);
             let lambda_x_defect = lambda[i];
-            let lambda_x_defect_prev = lambda[self.prev(i)];
+            let lambda_x_defect_prev = lambda[prev_i];
+            let lambda_rate = lambda[5 * n + i];
+            let lambda_rate_prev = lambda[5 * n + prev_i];
+            let d_i = kappas[ip1] - kappas[i];
+            let d_prev = kappas[i] - kappas[prev_i];
             let lambda_n_defect = lambda[n + i];
             let lambda_xi_defect = lambda[2 * n + i];
             let lambda_ellipse = lambda[3 * n + i];
@@ -817,12 +871,13 @@ impl ConstrainedProblem for RacingLineProblem {
                 - 4.0 * xs[i].powi(2) * kap * c_l / (l.powi(2) * g_eff.powi(3));
             let d2f_dxdn = 0.5 * ds * self.curvature[i] * xs[i].powf(-1.5);
 
-            let k = 10 * i;
+            let k = 12 * i;
             vals[k] = obj_factor * d2f_dx2 + lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2;
             vals[k + 1] = lambda_ellipse * d2e_du2;
             vals[k + 2] = lambda_ellipse * d2e_dxdu;
-            vals[k + 3] = lambda_ellipse * d2e_dkappa2;
-            vals[k + 4] = lambda_ellipse * d2e_dkappadx;
+            vals[k + 3] = lambda_ellipse * d2e_dkappa2
+                + 2.0 * (lambda_rate * xs[i] + lambda_rate_prev * xs[prev_i]);
+            vals[k + 4] = lambda_ellipse * d2e_dkappadx - 2.0 * lambda_rate * d_i;
             vals[k + 5] = obj_factor * d2f_dxdn;
             vals[k + 6] = lambda_n_defect * 0.5 * ds * self.curvature[i];
             vals[k + 7] = lambda_n_defect * 0.5 * ds * self.curvature[ip1];
@@ -830,6 +885,8 @@ impl ConstrainedProblem for RacingLineProblem {
             // u_i appears in the x-defect starting at i and the one ending at i.
             vals[k + 9] =
                 (lambda_x_defect + lambda_x_defect_prev) * ds * self.curvature[i];
+            vals[k + 10] = -2.0 * lambda_rate * xs[i];
+            vals[k + 11] = 2.0 * lambda_rate_prev * d_prev;
         }
         true
     }
@@ -850,6 +907,7 @@ pub fn solve_racing_line(
     n_right_full: &[f64],
     drs_s: &[f64],
     drs_open: &[bool],
+    omega_max: Option<f64>,
 ) -> Result<(Vec<f64>, Vec<f64>, f64, f64), String> {
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
@@ -897,6 +955,7 @@ pub fn solve_racing_line(
         u_bound,
         xi_bound,
         kappa_bound,
+        rate_bound_sq: omega_max.map(|w| (w * ds).powi(2)).unwrap_or(1e20),
         n_left,
         n_right,
         initial_x,

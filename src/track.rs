@@ -384,6 +384,24 @@ pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Bo
 }
 
 
+// Reads python_scripts/export_track.py's reference_lap.csv: Distance, Speed (m, km/h) --
+// the real driven lap's speed trace, on the same FastF1 Distance axis as the geometry.
+pub fn load_reference_lap(path: &Path) -> Result<(Vec<f64>, Vec<f64>), Box<dyn Error>> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut s: Vec<f64> = Vec::new();
+    let mut speed: Vec<f64> = Vec::new();
+    let mut lines = reader.lines();
+    lines.next(); // skip header
+    for line in lines {
+        let line = line?;
+        let mut cols = line.split(',');
+        s.push(cols.next().ok_or("missing distance")?.parse::<f64>()?);
+        speed.push(cols.next().ok_or("missing speed")?.parse::<f64>()? / 3.6);
+    }
+    Ok((s, speed))
+}
+
+
 // Reads python_scripts/derive_downforce.py's output: one row, c_l,c_d -- per-track aero
 // coefficients derived from that track's own real telemetry (apex lateral acceleration,
 // top speed), in place of api.rs's 3-tier HIGH/MED/LOW_DOWNFORCE guess.
