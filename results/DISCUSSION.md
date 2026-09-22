@@ -598,6 +598,47 @@ Each was tested rather than argued, and each is recorded here mostly so it isn't
   times), which is the honest price of a limit the real lap only satisfies to the 99th
   percentile.
 
+## The residual pinned-width artifact: a sub-grid wiggle, not a solver bug
+
+The staggered grid removed the odd-even null space, but the pinned-width check (width forced
+to ±1 cm, where the racing line can gain essentially nothing real) still finds time, and
+*more* of it as the grid refines — the opposite of what a discretization error does:
+
+| grid | racing | fixed | artifact | if it scaled as 1/ds² |
+|---|---|---|---|---|
+| 25 m | 87.926 | 88.007 | 0.081 s | 0.081 s |
+| 10 m | 87.404 | 87.849 | 0.445 s | 0.506 s |
+| 5 m | 86.973 | 88.050 | 1.077 s | 2.025 s |
+| 2 m | 86.834 | 88.514 | 1.680 s | 12.66 s |
+
+(Suzuka.) The mechanism, from dumping the solution: the curvature deviation is almost
+entirely checkerboard (0.00029 of 0.00033 rms at 5 m), worth up to **8.9 m/s² of lateral
+acceleration** — a fifth of the grip budget — bought with a 1 cm zigzag in `n`. The reason
+it grows on finer grids is that a wiggle's curvature goes as `n/ds²`, so with the amplitude
+fixed at 1 cm, halving `ds` quadruples the curvature the solver can dial in. The growth is
+sub-quadratic in practice because the steering-rate limit clips part of it.
+
+Two things make that profitable, and neither is a coding error:
+
+1. **The friction ellipse is enforced only at collocation points.** The solver puts the
+   low-curvature phase of the wiggle exactly on the node where the constraint binds (an
+   apex) and the high-curvature phase on neighbours that had slack. Evaluated at segment
+   midpoints, the solution does exceed the limit — but only mildly (max 1.022, 3% of
+   midpoints), so denser constraint enforcement would recover part of this, not all.
+2. **A point mass has no cost for high-frequency steering.** A 1 cm zigzag at a 10 m
+   wavelength is a real path a car could trace geometrically (its curvature amplitude
+   implies ~0.3° of steering angle), and nothing in this model charges for putting the
+   steering in and taking it out again — no yaw inertia, no tire relaxation, no unsprung
+   response. This is the *same* root cause as the racing line's overall over-performance,
+   arriving through a different door.
+
+So this is not a separate numerical defect to be chased with another reformulation; the
+honest reading is that it is the point-mass assumption showing up at grid scale. It does
+have a practical consequence worth stating plainly: **at the 5 m default the racing line
+carries roughly a second of this artifact**, on top of everything else that makes it an
+upper bound. The fixed line is unaffected (its curvature is fixed, so there is no wiggle to
+find), which is the mode the validation number belongs to.
+
 ## Where that leaves it
 
 By elimination the remaining gap is the vehicle model itself — and specifically *not* the
