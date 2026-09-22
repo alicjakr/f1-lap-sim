@@ -531,7 +531,8 @@ slow by 0.6–2.8 s.
 | interlagos | 66.701 | 72.677 | 67.281 | +8.0% | −0.9% |
 | silverstone | 81.458 | 93.085 | 85.892 | +8.4% | −5.2% |
 
-**Fixed line: +2.3% mean (stdev 4.5%). Racing line: −7.6% mean (stdev 4.8%).**
+**Fixed line: +2.5% mean (stdev 4.3%). Racing line: −7.4% mean (stdev 4.7%).** (The table
+above is before the steering-rate limit described below, which shifts both by ~0.2%.)
 
 The fixed-line number is credible — a theoretical optimum on a real driver's own line,
 landing a couple of percent slow, with the residual spread explainable by per-track aero and
@@ -571,15 +572,29 @@ Each was tested rather than argued, and each is recorded here mostly so it isn't
   corners, making Silverstone and Spa infeasible. Position fit and second-derivative quality
   are not the same objective.
 - **Curvature rate (the point-mass "flick").** A point mass can change path curvature
-  instantly; a real car must build yaw and steering angle first. Capping |κ[i+1] − κ[i]| at
-  the fastest rate the real car demonstrably achieved on its own line is cheap (a linear
-  constraint, no Hessian terms) — and moves lap times by 0.0–0.6 s, leaving −7.4%. The
-  binding bound would have to be far tighter than anything the reference lap justifies, so
-  it wasn't kept.
+  instantly; a real car must build yaw and steering angle first, so its curvature rate is
+  bounded in *time*, not distance: `|dkappa/ds| <= omega_max/v`. Measured, the free line was
+  using |dkappa/dt| of ~0.30 1/(m·s) at the 95th percentile on Suzuka where the real car
+  managed 0.04 — 7x, and above the real car's recorded maximum. That looked like the answer.
+  It isn't: capping it at the rate the real car demonstrably achieved (99th percentile of
+  the reference lap's own |dkappa/dt|, measured on the solver's grid) pulls the line's
+  curvature rate down by 3x, to exactly the limit — and moves lap time by 0.0-0.97 s. The
+  freedom to flick was worth about a tenth of a second, not ten.
+
+  The constraint was **kept anyway**, because it costs almost nothing and the racing line's
+  *shape* is an output in its own right: the line it now draws is one a car could actually
+  steer. It applies to both problems — on `MinTimeProblem`, where kappa is fixed, it reduces
+  to a per-point speed cap, and it has to be applied there too or `n=0` stops being feasible
+  for the racing-line problem and the "racing line can never be slower" invariant breaks. It
+  costs a little accuracy on the validated fixed-line number (+2.3% -> +2.5% against pole
+  times), which is the honest price of a limit the real lap only satisfies to the 99th
+  percentile.
 
 ## Where that leaves it
 
-By elimination the remaining gap is the vehicle model itself. **A point mass pays nothing to
+By elimination the remaining gap is the vehicle model itself — and specifically *not* the
+one part of it that looked most suspicious, since the steering-rate test above ruled out
+instantaneous direction change as the mechanism. **A point mass pays nothing to
 reposition laterally beyond satisfying the grip limit pointwise** — no yaw inertia, no load
 transfer, no slip angle, no steering dynamics. On a fixed line that costs little, since the
 path's curvature came from a real car in the first place, and `c_l` is derived from that

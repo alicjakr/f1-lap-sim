@@ -5,8 +5,8 @@ the fastest velocity profile — and optionally the fastest line within the trac
 width — around a track, given real track geometry and boundaries.
 
 Validated against real 2018 F1 qualifying pole times across 15 tracks: the **fixed-line**
-solver (`optimal` mode) comes out **+2.3% slower than pole on average**. The **free racing
-line** (`racingline` mode, the default) currently comes out ~7.6% *faster* than pole, which
+solver (`optimal` mode) comes out **+2.5% slower than pole on average**. The **free racing
+line** (`racingline` mode, the default) currently comes out ~7.4% *faster* than pole, which
 is not a lap-time prediction — it's an upper bound on what line choice alone could buy a
 point-mass car, which pays nothing for changing direction beyond its grip limit. See V7 in
 `results/DISCUSSION.md` for the audit behind both numbers and what a fix would take.
@@ -19,7 +19,7 @@ The pipeline is split in two:
   telemetry (FastF1) and track boundary geometry (OpenStreetMap) to CSV for Rust to
   consume. Not a second implementation of the physics.
 
-See `results/DISCUSSION.md` for the full engineering narrative (V1 through V6): what was
+See `results/DISCUSSION.md` for the full engineering narrative (V1 through V7): what was
 tried, what was rejected and why, and how the model's accuracy evolved.
 
 ## Setup
@@ -55,7 +55,7 @@ cargo run --release -- <track> [mode] [spacing]
     solver can straighten corners the way a real driver does. Requires that boundaries file
     to exist. Treat its lap time as an upper bound rather than a prediction (see above).
   - `optimal` — the same minimum-time collocation solver, but pinned to the fixed
-    FastF1-driven centerline (no lateral freedom). This is the validated mode (+2.3% vs.
+    FastF1-driven centerline (no lateral freedom). This is the validated mode (+2.5% vs.
     real pole times). Also serves as `racingline`'s own correctness baseline: since a zero
     lateral offset is always a feasible racing-line solution, `racingline`'s lap time can
     never come out slower than `optimal`'s — printed automatically as a sanity check.
@@ -89,7 +89,7 @@ Produced by the Python export scripts below, keyed by the same `<slug>_` prefix:
 | File | Produced by | Required for |
 |---|---|---|
 | `<slug>_track_geometry.csv` | `export_track.py` | both modes |
-| `<slug>_reference_lap.csv` | `export_track.py` | both modes |
+| `<slug>_reference_lap.csv` | `export_track.py` | the steering-rate limit and `derive_downforce.py` (skipped if missing) |
 | `<slug>_track_boundaries.csv` | `export_osm_boundaries.py` | `racingline` mode |
 | `<slug>_drs_zones.csv` | `export_track.py` | DRS modeling (falls back to DRS-closed if missing) |
 | `<slug>_aero_params.csv` | `derive_downforce.py` | per-track aero (falls back to a coarse 3-tier default if missing) |
