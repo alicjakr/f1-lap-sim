@@ -531,8 +531,9 @@ slow by 0.6–2.8 s.
 | interlagos | 66.701 | 72.677 | 67.281 | +8.0% | −0.9% |
 | silverstone | 81.458 | 93.085 | 85.892 | +8.4% | −5.2% |
 
-**Fixed line: +2.5% mean (stdev 4.3%). Racing line: −7.4% mean (stdev 4.7%).** (The table
-above is before the steering-rate limit described below, which shifts both by ~0.2%.)
+**Fixed line: +2.5% mean (stdev 4.3%). Racing line: −7.4% mean (stdev 4.7%)** at the 25 m
+spacing that was the default when this was measured. At the 5 m default adopted below, the
+same 15 tracks read **+3.8%** and **−8.5%** respectively.
 
 The fixed-line number is credible — a theoretical optimum on a real driver's own line,
 landing a couple of percent slow, with the residual spread explainable by per-track aero and
@@ -556,10 +557,17 @@ Each was tested rather than argued, and each is recorded here mostly so it isn't
   (6.2% of samples) and Baku (13.0%) are localized spikes, not drift — their 5th–95th
   percentiles are as tight as anyone's. A better global registration would change little.
 - **Grid spacing.** Old and new coarsening converge to the same lap time at 1 m, confirming
-  the uniform-grid fix. But 25 m reads 1–2 s optimistic versus converged, almost always
+  the uniform-grid fix. But 25 m reads 1-2 s optimistic versus converged, almost always
   fast, because widely spaced samples skip curvature peaks; 5 m is within ~0.1 s and costs
-  under a second. **The default 25 m is worth revisiting**, independently of everything else
-  here.
+  under a second. **The default was therefore changed from 25 m to 5 m** -- which makes the
+  headline numbers *worse* (fixed line +2.5% -> +3.8%, racing line -7.4% -> -8.5%), since
+  the coarse grid had been flattering both. That is the correct direction: a lap time that
+  looks better because the grid is too coarse to see the corners is not a better lap time.
+  Two consequences worth knowing: the results table above was measured at 25 m and so reads
+  about a second fast, and the pinned-width artifact below *grows* on finer grids (Suzuka
+  0.08 s at 25 m, 1.08 s at 5 m) -- with 1 cm of width the solver can still find ~1 s, so
+  some residual grid-scale exploit survives the staggered formulation. Smaller than the gap
+  being chased here, but the next numerical thing to look at.
 - **Geometry smoothing.** The 12 m / λ=1 spline fit was suspected of over-smoothing corners
   (an apparent 30–60% under-statement of corner curvature). That suspicion was wrong: it
   compared against a Savitzky-Golay estimate from raw telemetry that is itself

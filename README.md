@@ -5,8 +5,8 @@ the fastest velocity profile — and optionally the fastest line within the trac
 width — around a track, given real track geometry and boundaries.
 
 Validated against real 2018 F1 qualifying pole times across 15 tracks: the **fixed-line**
-solver (`optimal` mode) comes out **+2.5% slower than pole on average**. The **free racing
-line** (`racingline` mode, the default) currently comes out ~7.4% *faster* than pole, which
+solver (`optimal` mode) comes out **+3.8% slower than pole on average**. The **free racing
+line** (`racingline` mode, the default) currently comes out ~8.5% *faster* than pole, which
 is not a lap-time prediction — it's an upper bound on what line choice alone could buy a
 point-mass car, which pays nothing for changing direction beyond its grip limit. See V7 in
 `results/DISCUSSION.md` for the audit behind both numbers and what a fix would take.
@@ -55,19 +55,21 @@ cargo run --release -- <track> [mode] [spacing]
     solver can straighten corners the way a real driver does. Requires that boundaries file
     to exist. Treat its lap time as an upper bound rather than a prediction (see above).
   - `optimal` — the same minimum-time collocation solver, but pinned to the fixed
-    FastF1-driven centerline (no lateral freedom). This is the validated mode (+2.5% vs.
+    FastF1-driven centerline (no lateral freedom). This is the validated mode (+3.8% vs.
     real pole times). Also serves as `racingline`'s own correctness baseline: since a zero
     lateral offset is always a feasible racing-line solution, `racingline`'s lap time can
     never come out slower than `optimal`'s — printed automatically as a sanity check.
-- **`[spacing]`** — target collocation-point spacing in meters. Default: `25.0`. Smaller
-  values give a finer solve at higher computational cost.
+- **`[spacing]`** — target collocation-point spacing in meters. Default: `5.0`. Lap time is
+  still converging above that: 25 m reads 1–2 s optimistic because widely spaced samples
+  skip curvature peaks, while 5 m is within ~0.1 s of a full 1 m solve. Coarser values are
+  faster but flattering; finer ones cost time without changing the answer.
 
 Examples:
 
 ```
-cargo run --release -- monaco                      # racingline mode, 25m spacing
-cargo run --release -- suzuka optimal 25            # fixed-line baseline
-cargo run --release -- redbullring racingline 15    # finer grid
+cargo run --release -- monaco                      # racingline mode, 5m spacing
+cargo run --release -- suzuka optimal 5             # fixed-line baseline
+cargo run --release -- redbullring racingline 25    # coarser, faster, optimistic
 ```
 
 ### Output
