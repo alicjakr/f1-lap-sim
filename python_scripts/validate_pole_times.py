@@ -70,7 +70,7 @@ def real_pole_seconds(event_name: str) -> float:
 
 def solver_seconds(slug: str) -> float:
     result = subprocess.run(
-        [str(BINARY), slug, "racingline", "25"],
+        [str(BINARY), slug, "racingline", "5"],
         capture_output=True, text=True, check=True,
     )
     match = LAP_TIME_RE.search(result.stdout)

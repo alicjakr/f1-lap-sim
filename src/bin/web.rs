@@ -16,7 +16,7 @@ struct SolveParams {
 }
 
 fn default_spacing() -> f64 {
-    25.0
+    5.0 // see main.rs: 25 m reads 1-2 s optimistic, 5 m is within ~0.1 s of converged
 }
 
 async fn tracks() -> Json<Vec<api::TrackInfo>> {
