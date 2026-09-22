@@ -51,6 +51,7 @@ MIN_APEX_SPEED_KMH = 150.0
 MIN_CURVATURE = 0.008
 DVDS_PERCENTILE = 25  # bottom 25% of |dv/ds| = "quasi-steady-state" cornering
 SMOOTH_WINDOW = 9
+MIN_SAMPLES_WARN = 10  # below this, c_l rests on too few apexes to be trustworthy
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument("--track", required=True, help="Track slug matching data/<slug>_track_geometry.csv")
@@ -84,6 +85,12 @@ mask = (
     & (v_s * 3.6 >= MIN_APEX_SPEED_KMH)
 )
 
+# Each sample is only informative if the car was actually at the lateral limit there: the
+# estimator inverts a_lat = mu_lat*(G + c_l*v^2), which assumes exactly that. A negative
+# implied c_l means the point produced less lateral acceleration than mechanical grip alone
+# allows, i.e. the driver wasn't at the limit, so it says nothing about downforce and is
+# dropped rather than dragging the median down. (Measured across the working tracks this
+# currently never fires -- the |dv/ds|/curvature/speed filters above already exclude them.)
 c_l_samples = []
 for vi, ki in zip(v_s[mask], np.abs(kappa[mask])):
     a_lat = vi**2 * ki
@@ -98,6 +105,15 @@ if not c_l_samples:
         "its real corner speeds, or fall back to the 3-tier system in api.rs)"
     )
 c_l = float(np.median(c_l_samples))
+# c_l drives cornering speed everywhere, so a handful of apexes is thin evidence for it.
+# Observed counts on the working tracks range from 2 (Monza, almost no slow corners above
+# MIN_APEX_SPEED_KMH) to ~25 (Spa) -- worth knowing which end a given track sits at before
+# trusting its lap time.
+if len(c_l_samples) < MIN_SAMPLES_WARN:
+    print(
+        f"WARNING: {slug}: c_l derived from only {len(c_l_samples)} qualifying apex "
+        f"sample(s); treat this track's aero (and so its lap time) as weakly determined."
+    )
 
 v_max = np.percentile(v_s, 99.5)
 c_d_drs = P_ENGINE / v_max**3
