@@ -659,7 +659,20 @@ So the honest reading of the current state:
   car — directionally useful, not a lap-time prediction, and currently the CLI default and
   the only mode the web UI runs.
 
-The natural next step is a single-track (bicycle) model with yaw dynamics — new states for
-yaw rate and sideslip, separate front/rear tire forces — which is a considerably bigger
-change than anything in V1–V7 and the first one where the point-mass assumption itself, in
-place since V1, actually goes away.
+The obvious next step would be a fuller vehicle model — quasi-steady load transfer with
+load-sensitive tires, then a single-track model with yaw dynamics. Both were sized before
+building either, and **neither can close this gap**. Bounding the curvature rate at the
+rate the real car achieved is worth ≤1 s (above). Lateral load transfer with load-sensitive
+tires, evaluated on the actual solved laps at Suzuka, Monaco and Silverstone, costs
+**0.2–0.6% of grip on average** (worst ~4% at the highest-transfer corners, at load
+sensitivity exponents 0.10–0.25) — roughly 0.1–0.3 s a lap. The gap is eight seconds.
+
+That is worth stating plainly because it is counter-intuitive: the model is missing real
+physics, and adding that physics correctly would change the answer by well under a second.
+What actually scales with the gap is lateral freedom — the racing line gains about **1 s per
+metre of corridor**, measured by widening it — and the corridor is centred on a line that is
+already a racing line, so the solver spends a gain the driver had already taken. Closing
+this needs the corridor's *asymmetry* (at an apex the inside edge is at the driven line, not
+2.5 m beyond it), which needs track-edge geometry the OSM export doesn't currently provide,
+not a better car model. A fuller vehicle model remains worth building for its own sake; it
+is not the fix for this.
