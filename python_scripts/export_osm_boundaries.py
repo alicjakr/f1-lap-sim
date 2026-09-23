@@ -52,12 +52,16 @@ Requires data/<slug>_track_geometry.csv to already exist (run export_track.py fi
 
 import argparse
 import math
+import time
 
 import numpy as np
 import pandas as pd
 import requests
 from scipy.spatial import cKDTree
 
+# Default Overpass instance. It refuses connections outright when it is down or has
+# firewalled an IP (a TCP refusal, not a 429), so --overpass-url switches to a mirror:
+# https://overpass.kumi.systems/api/interpreter or https://lz4.overpass-api.de/api/interpreter.
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 LANE_WIDTH_M = 3.5
 DEFAULT_LANES = 2.0
@@ -75,8 +79,13 @@ def haversine_m(p1, p2):
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
-def overpass_query(query):
-    resp = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=90)
+def overpass_query(query, url=OVERPASS_URL, timeout=90):
+    # These instances queue requests, so a slow answer is normal and silence is not --
+    # say what we are waiting on, and how long it took, rather than appearing to hang.
+    print(f"Querying {url} (up to {timeout}s)...", flush=True)
+    started = time.time()
+    resp = requests.post(url, data={"data": query}, headers=HEADERS, timeout=timeout)
+    print(f"  responded in {time.time() - started:.1f}s (HTTP {resp.status_code})", flush=True)
     resp.raise_for_status()
     return resp.json()
 
@@ -89,7 +98,48 @@ def way_width(tags):
     return None  # caller decides the right fallback for its source
 
 
-def fetch_segments_from_relation(relation_name):
+def inspect_tags(relation_name, url):
+    """Report which width-bearing tags a circuit's member ways actually carry.
+
+    Width is the weakest link in this pipeline: way_width prefers an explicit `width` tag,
+    falls back to lanes * LANE_WIDTH_M, and finally to a constant -- and in practice every
+    track exported so far has landed on the constant, which means the corridor handed to the
+    solver is a default rather than a measurement. Run this before trusting a track's width.
+    """
+    # Tags only: the census doesn't need geometry, and asking for it makes the query
+    # expensive enough that busy instances return 504 instead of answering.
+    query = (
+        f'[out:json][timeout:60];'
+        f'(relation["type"="circuit"]["name"~"{relation_name}",i];'
+        f'relation["type"="circuit"]["name:en"~"{relation_name}",i];)->.r;'
+        f'.r out body;'
+        f'way(r.r);'
+        f'out tags;'
+    )
+    data = overpass_query(query, url)
+    relations = [e for e in data["elements"] if e["type"] == "relation"]
+    print(f"matched {len(relations)} relation(s): {[r['tags'].get('name') for r in relations]}")
+    ways = [e for e in data["elements"] if e["type"] == "way"]
+    counts = {}
+    widths = set()
+    for way in ways:
+        tags = way.get("tags", {})
+        for key in ("width", "est_width", "lanes", "area:highway", "surface", "highway"):
+            if key in tags:
+                counts[key] = counts.get(key, 0) + 1
+        if "width" in tags:
+            widths.add(tags["width"])
+    print(f"{len(ways)} member ways")
+    print(f"  tag counts: {counts or 'none of width/est_width/lanes/area:highway/surface/highway'}")
+    if widths:
+        print(f"  width values seen: {sorted(widths)}")
+    else:
+        print(f"  no explicit width tags -- way_width falls back to lanes, then "
+              f"{DEFAULT_LANES * LANE_WIDTH_M:.1f} m")
+
+
+
+def fetch_segments_from_relation(relation_name, url=OVERPASS_URL):
     """Street circuits: a type=circuit relation lists constituent public-road ways, which
     carry lanes tags. Returns None if no matching relation exists (caller falls back to bbox).
 
@@ -103,7 +153,7 @@ def fetch_segments_from_relation(relation_name):
         f'relation["type"="circuit"]["name:en"~"{relation_name}",i];);'
         f'out body;>;out geom;'
     )
-    data = overpass_query(query)
+    data = overpass_query(query, url)
     relations = [e for e in data["elements"] if e["type"] == "relation"]
     if not relations:
         return None
@@ -129,7 +179,7 @@ def fetch_segments_from_relation(relation_name):
     return segments
 
 
-def fetch_segments_from_bbox(bbox):
+def fetch_segments_from_bbox(bbox, url=OVERPASS_URL):
     """Permanent circuits without a relation: query highway=raceway ways directly within a
     lat/lon bounding box, excluding the pit lane by name. No lanes/width tags exist for these
     (checked on Suzuka) so every segment gets FALLBACK_WIDTH_M -- no per-point width signal,
@@ -140,7 +190,7 @@ def fetch_segments_from_bbox(bbox):
         f'way["highway"="raceway"]["sport"="motor"]({lat_min},{lon_min},{lat_max},{lon_max});'
         f'out geom;'
     )
-    data = overpass_query(query)
+    data = overpass_query(query, url)
     segments = []
     for way in data["elements"]:
         if way["type"] != "way" or "geometry" not in way or len(way["geometry"]) < 2:
@@ -329,7 +379,15 @@ def main():
     parser.add_argument("--outlier-threshold", type=float, default=10.0, help="despike_offset: how far a jump-bounded segment's mean must sit from the track median to count as bad (default 10.0)")
     parser.add_argument("--hysteresis-high", type=float, default=20.0, help="despike_offset: deviation from median (m) that seeds a bad region for the gradual-drift detector (default 20.0)")
     parser.add_argument("--hysteresis-low", type=float, default=10.0, help="despike_offset: deviation from median (m) a bad region floods outward through (default 10.0)")
+    parser.add_argument("--overpass-url", default=OVERPASS_URL, help="Overpass instance to query; switch to a mirror when the default refuses connections")
+    parser.add_argument("--inspect-tags", action="store_true", help="report which width-bearing tags this circuit's ways carry, then exit (needs --relation-name)")
     args = parser.parse_args()
+
+    if args.inspect_tags:
+        if not args.relation_name:
+            parser.error("--inspect-tags needs --relation-name")
+        inspect_tags(args.relation_name, args.overpass_url)
+        return
     slug = args.track.lower()
     if not args.relation_name and not args.bbox:
         parser.error("provide --relation-name and/or --bbox")
@@ -337,12 +395,12 @@ def main():
     segments = None
     if args.relation_name:
         print(f"Querying OSM for circuit relation matching '{args.relation_name}'...")
-        segments = fetch_segments_from_relation(args.relation_name)
+        segments = fetch_segments_from_relation(args.relation_name, args.overpass_url)
     if segments is None:
         if not args.bbox:
             raise ValueError(f"No OSM circuit relation found matching name '{args.relation_name}', and no --bbox given as a fallback.")
         print(f"No relation found; querying highway=raceway ways in bbox {args.bbox}...")
-        segments = fetch_segments_from_bbox(args.bbox)
+        segments = fetch_segments_from_bbox(args.bbox, args.overpass_url)
     print(f"{len(segments)} non-pitlane ways")
 
     # Chaining into one ordered closed loop is only needed for the length sanity-check below,
