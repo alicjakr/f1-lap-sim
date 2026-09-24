@@ -123,6 +123,55 @@ python python_scripts/validate_pole_times.py --track suzuka   # or no --track fo
 python python_scripts/plot_racing_line.py --track suzuka
 ```
 
+### Regenerating `data/` from scratch
+
+`data/` is gitignored, so a fresh clone has no track data. These are the per-track export
+recipes, recovered from the session history that produced the current files — treat the
+relation-name search strings as *starting points*: OSM renames things, and the script fails
+loudly (no match, or "Ambiguous match ... narrow the search string") rather than silently
+producing something wrong. `--inspect-tags` is the quickest way to confirm a name resolves.
+
+The boundary step is the one with per-track arguments, so it's the one recorded here. For
+`export_track.py` only three lap numbers were recorded — `Monza --lap-number 2`,
+`Singapore --lap-number 3`, `Suzuka --lap-number 2` — and the rest used the default fastest
+lap (check the endpoint gap it prints; see its docstring for why that matters). Note that
+the output slug is just `--track` lowercased, so the value used for multi-word circuits must
+have been a single token to produce slugs like `paulricard`; the exact strings weren't
+recorded. Every track also needs `derive_downforce.py --track <slug>` afterwards.
+
+| slug | `export_osm_boundaries.py --track <slug> ...` |
+|---|---|
+| bahrain | `--relation-name "Bahrain International Circuit"` ¹ |
+| baku | `--relation-name "Baku City Circuit"` |
+| catalunya | `--relation-name "Catalunya GP FIA"` ¹ |
+| cota | `--relation-name "Circuit of the Americas"` |
+| hockenheim | `--relation-name "Hockenheim"` |
+| hungaroring | `--relation-name "Hungaroring"` |
+| interlagos | `--relation-name "Carlos Pace"` |
+| mexico | no OSM relation found ² |
+| monaco | `--relation-name "Circuit de Monaco"` |
+| montreal | `--relation-name "Gilles Villeneuve"` |
+| monza | `--relation-name "Monza"` |
+| paulricard | `--relation-name "Paul Ricard"` |
+| redbullring | `--relation-name "Red Bull Ring" --jump-threshold 10 --outlier-threshold 6 --hysteresis-high 8 --hysteresis-low 5` |
+| shanghai | `--relation-name "Shanghai"` |
+| silverstone | `--relation-name "Silverstone Grand Prix"` |
+| singapore | `--relation-name "Marina Bay"` ² |
+| sochi | no OSM relation found ² |
+| spa | `--relation-name "Spa-Francorchamps"` |
+| suzuka | `--relation-name "Suzuka"` (verified 2026-09; 41 ways, no width tags) |
+| yasmarina | `--relation-name "Yas Marina" --jump-threshold 13 --outlier-threshold 8 --hysteresis-high 13 --hysteresis-low 8` |
+
+¹ Boundary data unusable even when the relation resolves — the relation bundles several
+real track layouts (registration residual 35–63 m). Kept here for completeness; these
+tracks are excluded from the working set.
+² Not in the working 15: Mexico and Sochi have no OSM circuit relation at all, and
+Singapore's geometry exceeds the solver's steering-rate/small-angle limit. See
+`results/DISCUSSION.md` V6.
+
+If the default Overpass instance refuses connections, pass
+`--overpass-url https://overpass.kumi.systems/api/interpreter`.
+
 - **`export_track.py`** — pulls a real FastF1 lap (default: 2018 Q, HAM) and exports
   centerline geometry, reference speed trace, and DRS zones. `--lap-number` matters:
   the fastest lap isn't always the cleanest telemetry (see its docstring).
