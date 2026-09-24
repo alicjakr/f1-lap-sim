@@ -121,6 +121,7 @@ main {
 .stat .value.highlight { color: var(--red); }
 
 .error { color: #ff6b6b; font-size: 0.9rem; padding: 8px 0; }
+.note { margin: 10px 0 4px; font-size: 0.75rem; line-height: 1.45; color: var(--text-dim); }
 .warning {
   color: var(--amber);
   font-size: 0.8rem;

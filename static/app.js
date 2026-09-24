@@ -252,20 +252,31 @@ function renderSpeedTrace(result) {
 
 function renderStats(result) {
   const real = result.real_lap_time_2018_s;
-  const realRow = real == null
-    ? ''
-    : `
-    <div class="stat"><span class="label">2018 pole time</span><span class="value">${formatLapTime(real)}</span></div>
-    <div class="stat"><span class="label">Gap to 2018 pole</span><span class="value">${(result.lap_time_s - real >= 0 ? '+' : '')}${(result.lap_time_s - real).toFixed(3)} s</span></div>`;
+  const rows = [
+    // The plotted line. Free to use the full track width around a reference line that is
+    // itself a racing line, so it reads faster than reality -- an upper bound, not a
+    // prediction (see V7 in results/DISCUSSION.md).
+    ['Racing line', formatLapTime(result.lap_time_s), 'highlight'],
+    // Same solver pinned to the driven line: the mode validated against real pole times.
+    ['Fixed line', formatLapTime(result.fixed_line_time_s), ''],
+  ];
+  if (real != null) {
+    const gap = result.fixed_line_time_s - real;
+    rows.push(['2018 pole', formatLapTime(real), '']);
+    rows.push(['Fixed line vs pole', `${gap >= 0 ? '+' : ''}${gap.toFixed(3)} s`, '']);
+  }
+  rows.push(['Avg. line offset', `${result.mean_abs_n.toFixed(2)} m`, '']);
+  rows.push(['Max. line offset', `${result.max_abs_n.toFixed(2)} m`, '']);
 
   const issue = trackInfoBySlug[result.track] && trackInfoBySlug[result.track].known_issue;
   const warningBanner = issue ? `<div class="warning">⚠️ ${issue}</div>` : '';
 
-  statsEl.innerHTML = `${warningBanner}
-    <div class="stat"><span class="label">Solver lap time</span><span class="value highlight">${formatLapTime(result.lap_time_s)}</span></div>${realRow}
-    <div class="stat"><span class="label">Avg. line offset</span><span class="value">${result.mean_abs_n.toFixed(2)} m</span></div>
-    <div class="stat"><span class="label">Max. line offset</span><span class="value">${result.max_abs_n.toFixed(2)} m</span></div>
-  `;
+  statsEl.innerHTML = warningBanner
+    + rows.map(([label, value, cls]) =>
+        `<div class="stat"><span class="label">${label}</span><span class="value ${cls}">${value}</span></div>`).join('')
+    + `<p class="note">The racing line is an upper bound: it may use the full track width
+       around a reference lap that was already a racing line. The fixed line — same physics,
+       pinned to the driven line — is the validated figure.</p>`;
 }
 
 function renderError(message) {
