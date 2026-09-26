@@ -1,14 +1,21 @@
 """
-Compare the racing-line solver's lap times against real 2018 qualifying pole times, across
-every track with working OSM boundary data.
+Compare the solver's lap times against real 2018 qualifying pole times, across every track
+with working OSM boundary data.
 
-This is the check that drove several fixes this project went through: the original 3-tier
-downforce classification showed a systematic +16.3% mean gap (worse the more corner-heavy
-the track), which DRS modeling and per-track downforce derivation (see
-derive_downforce.py's docstring for the methodology and validation history) brought down to
-+0.9%. Committed here as a real, re-runnable script instead of the one-off scratchpad
-comparisons used to develop those fixes, so a future change to the solver, car parameters,
-or aero derivation can be checked against the same baseline.
+Reports both modes, because they mean different things (see results/DISCUSSION.md V7):
+
+  fixed line   -- the car is pinned to the lap the driver actually drove and only the speed
+                  profile is optimized. This is the number that validates the physics, and
+                  the one to watch when changing the car model or the aero derivation.
+  racing line  -- the solver also picks the path within the track width. It currently reads
+                  faster than any real lap, because the corridor is centred on a reference
+                  lap that was already a racing line, so the line optimization spends width
+                  the driver had already used. Reported for context, not as a prediction.
+
+This check drove several fixes: the original 3-tier downforce classification showed a
+systematic +16.3% mean gap (worse the more corner-heavy the track), which DRS modeling and
+per-track downforce derivation brought down sharply. Committed as a re-runnable script
+rather than the one-off comparisons used to develop those fixes.
 
 Real pole times are fetched live via FastF1 (session.laps.pick_fastest(), i.e. the outright
 fastest lap in Q by any driver -- not necessarily the same driver/lap used to export each
@@ -57,6 +64,7 @@ TRACKS = {
 
 BINARY = Path("target/release/f1-lap-sim")
 LAP_TIME_RE = re.compile(r"Lap time \(racing line\): (\d+):(\d+\.\d+)")
+FIXED_LINE_RE = re.compile(r"Fixed-line optimal lap time for comparison: (\d+\.\d+)s")
 
 
 def real_pole_seconds(event_name: str) -> float:
@@ -68,16 +76,18 @@ def real_pole_seconds(event_name: str) -> float:
     return fastest["LapTime"].total_seconds()
 
 
-def solver_seconds(slug: str) -> float:
+def solver_seconds(slug: str) -> tuple[float, float]:
+    """Both lap times from one run: racingline mode prints the fixed-line time too."""
     result = subprocess.run(
         [str(BINARY), slug, "racingline", "5"],
         capture_output=True, text=True, check=True,
     )
-    match = LAP_TIME_RE.search(result.stdout)
-    if not match:
-        raise ValueError(f"{slug}: couldn't find \"Lap time (racing line)\" in solver output")
-    minutes, seconds = match.groups()
-    return int(minutes) * 60 + float(seconds)
+    racing = LAP_TIME_RE.search(result.stdout)
+    fixed = FIXED_LINE_RE.search(result.stdout)
+    if not racing or not fixed:
+        raise ValueError(f"{slug}: couldn't find both lap times in the solver output")
+    minutes, seconds = racing.groups()
+    return int(minutes) * 60 + float(seconds), float(fixed.group(1))
 
 
 def main():
@@ -92,18 +102,21 @@ def main():
     rows = []
     for slug, event_name in tracks.items():
         real = real_pole_seconds(event_name)
-        sim = solver_seconds(slug)
-        pct = (sim - real) / real * 100
-        rows.append((slug, sim, real, pct))
+        racing, fixed = solver_seconds(slug)
+        rows.append((slug, fixed, racing, real, (fixed - real) / real * 100, (racing - real) / real * 100))
 
-    rows.sort(key=lambda r: r[3])
-    print(f"\n{'track':<13}{'solver':>10}{'real pole':>11}{'gap':>9}")
-    for slug, sim, real, pct in rows:
-        print(f"{slug:<13}{sim:>10.3f}{real:>11.3f}{pct:>+8.1f}%")
+    rows.sort(key=lambda r: r[4])
+    print(f"\n{'track':<13}{'fixed line':>11}{'racing line':>12}{'real pole':>11}{'fixed gap':>11}{'racing gap':>12}")
+    for slug, fixed, racing, real, fixed_pct, racing_pct in rows:
+        print(f"{slug:<13}{fixed:>11.3f}{racing:>12.3f}{real:>11.3f}{fixed_pct:>+10.1f}%{racing_pct:>+11.1f}%")
 
     if len(rows) > 1:
-        pcts = [r[3] for r in rows]
-        print(f"\nmean gap: {statistics.mean(pcts):+.1f}%  stdev: {statistics.stdev(pcts):.1f}%")
+        fixed_pcts = [r[4] for r in rows]
+        racing_pcts = [r[5] for r in rows]
+        print(f"\nfixed line (validated): mean {statistics.mean(fixed_pcts):+.1f}%  "
+              f"stdev {statistics.stdev(fixed_pcts):.1f}%")
+        print(f"racing line (upper bound, not a prediction): mean {statistics.mean(racing_pcts):+.1f}%  "
+              f"stdev {statistics.stdev(racing_pcts):.1f}%")
 
 
 if __name__ == "__main__":
