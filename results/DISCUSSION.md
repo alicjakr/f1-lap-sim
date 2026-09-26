@@ -652,12 +652,24 @@ the path and the calibration no longer constrains anything: lateral freedom beco
 available at a price no real car pays. Perantoni & Limebeer, whose curvilinear formulation
 this follows, pair it with a full vehicle model for precisely this reason.
 
-So the honest reading of the current state:
+So the honest reading of the current state — and the distinction is worth stating carefully,
+because "validated" and "more correct" point at different modes here:
 
-- **`optimal` (fixed line) is the validated model**, at +2.3% against real pole times.
-- **`racingline` is an upper bound** on what line choice alone could buy under a point-mass
-  car — directionally useful, not a lap-time prediction, and currently the CLI default and
-  the only mode the web UI runs.
+- **`racingline` is the more complete formulation.** It drops the assumption the fixed line
+  silently makes — that the driven path *is* the path — and contains `MinTimeProblem`
+  exactly as its `n=0` case. Modelling the line choice is more faithful to what a driver
+  actually does, not less. What's wrong is not the formulation but its inputs: freeing the
+  path adds degrees of freedom, and two of the constraints that should bound them are
+  missing (real track edges, and a car that pays something for changing direction). At
+  −8.5% against real poles it is a bound, not a prediction.
+- **`optimal` (fixed line) is the validated model**, at +3.8% against real pole times. Not
+  because it is better physics — it embeds an approximation of its own — but because it
+  asks a narrower question whose every input was measured. Its error therefore says
+  something about the physics; the racing line's says something about the data.
+
+Fix the corridor and add a vehicle model, and the ordering should reverse: the racing line
+becomes a genuine minimum-lap-time simulation rather than "the fastest way to drive one
+driver's line".
 
 The obvious next step would be a fuller vehicle model — quasi-steady load transfer with
 load-sensitive tires, then a single-track model with yaw dynamics. Both were sized before
