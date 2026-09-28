@@ -9,14 +9,14 @@ complete model**: it optimizes the path as well as the speed, and contains the f
 case exactly (a zero lateral offset). **`optimal` is the narrower one**: it pins the car to
 the lap a driver actually drove and optimizes only the speed profile.
 
-The narrower mode is the validated one, because everything it needs was measured: **+3.8%
+The narrower mode is the validated one, because everything it needs was measured: **+4.6%
 slower than real 2018 pole times** across 15 tracks. The more complete mode currently reads
-**~8.5% faster** than any real lap — not because the formulation is wrong, but because its
+**~7.6% faster** than any real lap — not because the formulation is wrong, but because its
 extra freedom is under-constrained. OSM has no real track widths, and the corridor it does
 get is centred on a lap that was already a racing line, so the solver re-spends width the
 driver had already used. Give it real track edges and a car that resists changing direction,
 and it should become the better predictor; until then its lap time is a bound, not a
-prediction. See V7 in `results/DISCUSSION.md` for the audit behind both numbers.
+prediction. See V7 and V8 in `results/DISCUSSION.md` for the audit behind both numbers.
 
 ## What it does and doesn't model
 
@@ -24,13 +24,15 @@ prediction. See V7 in `results/DISCUSSION.md` for the audit behind both numbers.
 
 - **Speed optimization on a known path.** Given the line a driver actually drove, it finds
   the fastest way to drive it — where to brake, how hard, when to get back on power. This
-  is the validated part: +3.8% mean vs. real 2018 pole times across 15 tracks.
+  is the validated part: +4.6% mean vs. real 2018 pole times across 15 tracks.
 - **Combined grip.** Braking and cornering share one friction budget (a friction ellipse),
   so the car can't brake at full force mid-corner.
 - **Aerodynamics per circuit.** Downforce and drag are derived from each track's own
   telemetry rather than guessed, and derived from apex speeds and top speed — not from lap
   time, so checking the result against lap times isn't circular.
 - **Power, drag and DRS**, including DRS only where the real car had it open.
+- **The hybrid's energy budget.** The ICE runs all lap; the MGU-K's 4 MJ (about 33 s at
+  full deployment) is a budget the solver chooses where to spend.
 - **A steering-rate limit**, so the path can't change direction faster than the real car did.
 - **The solve itself.** Minimum-time optimal control over the whole lap at once, with
   hand-derived derivatives checked against Ipopt's own finite-difference checker, and a
@@ -38,7 +40,7 @@ prediction. See V7 in `results/DISCUSSION.md` for the audit behind both numbers.
 
 **Doesn't work / not modelled:**
 
-- **Picking the line is not trustworthy.** `racingline` mode reads ~8.5% faster than any
+- **Picking the line is not trustworthy.** `racingline` mode reads ~7.6% faster than any
   real lap. Two reasons: OSM has no real track widths (every track falls back to a 7 m
   guess), and the corridor is centred on a lap that was already a racing line, so the
   solver re-spends width the driver had already used.
@@ -47,8 +49,8 @@ prediction. See V7 in `results/DISCUSSION.md` for the audit behind both numbers.
   find time a real car couldn't.
 - **A sub-grid artifact.** Give the car 1 cm of lateral freedom and it still finds 0.3–1.1 s
   by weaving, because the grip limit is only enforced at the solver's sample points.
-- **No energy budget.** Engine power is treated as available all lap; the real MGU-K has
-  roughly 33 s of deployment.
+- **Harvesting isn't modelled.** The MGU-K's 4 MJ per lap is granted rather than earned
+  under braking, and deployment can be spent anywhere in the lap.
 - **No tire wear, fuel burn, track evolution, elevation or banking.** Reasonable for a
   single qualifying lap, less so for anything else.
 - **6 of the 21 2018 circuits don't work**, all for data reasons (see V6 in `DISCUSSION.md`).
@@ -63,9 +65,8 @@ Things worth solving, roughly in order of how much they'd change the results:
    so it needs another source. This is the whole racing-line gap.
 2. **The weave.** Enforcing the grip limit between sample points, not just at them, would
    close part of it; the rest is the point-mass assumption.
-3. **ERS deployment as an optimization.** Where to spend a fixed energy budget for the most
-   lap time — a natural extension of the existing solver, and it would make the *validated*
-   mode more correct.
+3. **Harvesting.** Deployment is now budgeted (V8), but the budget is granted rather than
+   recovered under braking, and it can be spent anywhere in the lap.
 4. **A real vehicle model** (yaw dynamics, load transfer, tire slip). Measured as worth
    ≤1 s, so it's for correctness rather than accuracy.
 5. **Thin aero evidence on some tracks.** Monza derives its downforce from 2 corners;
@@ -81,7 +82,7 @@ The pipeline is split in two:
   telemetry (FastF1) and track boundary geometry (OpenStreetMap) to CSV for Rust to
   consume. Not a second implementation of the physics.
 
-See `results/DISCUSSION.md` for the full engineering narrative (V1 through V7): what was
+See `results/DISCUSSION.md` for the full engineering narrative (V1 through V8): what was
 tried, what was rejected and why, and how the model's accuracy evolved.
 
 ## Setup
@@ -117,7 +118,7 @@ cargo run --release -- <track> [mode] [spacing]
     solver can straighten corners the way a real driver does. Requires that boundaries file
     to exist. Treat its lap time as an upper bound rather than a prediction (see above).
   - `optimal` — the same minimum-time collocation solver, but pinned to the fixed
-    FastF1-driven centerline (no lateral freedom). This is the validated mode (+3.8% vs.
+    FastF1-driven centerline (no lateral freedom). This is the validated mode (+4.6% vs.
     real pole times). Also serves as `racingline`'s own correctness baseline: since a zero
     lateral offset is always a feasible racing-line solution, `racingline`'s lap time can
     never come out slower than `optimal`'s — printed automatically as a sanity check.
