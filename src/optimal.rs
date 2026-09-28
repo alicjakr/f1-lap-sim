@@ -62,6 +62,25 @@ pub fn coarsen_periodic(values: &[f64], full_ds: f64, target_spacing: f64) -> (V
     (coarse, ds)
 }
 
+/// Everything both solvers need about one track and car. Grouped rather than passed
+/// positionally so the two entry points stay readable, and so a new modelling input (an
+/// energy budget, say) is one field rather than another argument at every call site.
+pub struct SolveInputs<'a> {
+    /// Curvature of the fitted centerline at full resolution, sampled every `full_ds`.
+    pub curvature: &'a [f64],
+    pub full_ds: f64,
+    pub params: &'a CarParams,
+    /// Target spacing between collocation points; the solvers coarsen to it.
+    pub spacing: f64,
+    /// export_track.py's drs_zones.csv. Empty slices mean "no DRS data": every point then
+    /// uses the DRS-closed drag.
+    pub drs_s: &'a [f64],
+    pub drs_open: &'a [bool],
+    /// Steering-rate limit, |dkappa/dt| in 1/(m*s) -- see api::steering_rate_limit. None
+    /// leaves the path free to change direction as fast as the grid allows.
+    pub omega_max: Option<f64>,
+}
+
 fn check_status(status: SolveStatus) -> Result<(), String> {
     match status {
         SolveStatus::SolveSucceeded | SolveStatus::SolvedToAcceptableLevel => Ok(()),
@@ -320,15 +339,9 @@ impl ConstrainedProblem for MinTimeProblem {
 /// resampled here onto the coarse grid via resample_drs -- pass empty slices for a track
 /// with no DRS data (every point then uses params.c_d, i.e. DRS always closed).
 /// Returns (velocity profile, lap time, coarse ds), or Err if Ipopt didn't converge.
-pub fn solve_min_time(
-    curvature_full: &[f64],
-    full_ds: f64,
-    params: &CarParams,
-    target_spacing: f64,
-    drs_s: &[f64],
-    drs_open: &[bool],
-    omega_max: Option<f64>,
-) -> Result<(Vec<f64>, f64, f64), String> {
+pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), String> {
+    let SolveInputs { curvature: curvature_full, full_ds, params, spacing: target_spacing,
+                      drs_s, drs_open, omega_max } = *inputs;
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
@@ -898,17 +911,13 @@ impl ConstrainedProblem for RacingLineProblem {
 /// empty slices for a track with no DRS data. Returns (velocity profile, lateral offset
 /// profile, lap time, coarse ds), or Err if Ipopt didn't converge.
 pub fn solve_racing_line(
-    curvature_full: &[f64],
-    full_ds: f64,
-    params: &CarParams,
-    target_spacing: f64,
+    inputs: &SolveInputs,
     bound_s: &[f64],
     n_left_full: &[f64],
     n_right_full: &[f64],
-    drs_s: &[f64],
-    drs_open: &[bool],
-    omega_max: Option<f64>,
 ) -> Result<(Vec<f64>, Vec<f64>, f64, f64), String> {
+    let SolveInputs { curvature: curvature_full, full_ds, params, spacing: target_spacing,
+                      drs_s, drs_open, omega_max } = *inputs;
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 

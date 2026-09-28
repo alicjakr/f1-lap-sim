@@ -41,8 +41,17 @@ fn main() {
     if mode == "optimal" {
         let (coarse_curvature, coarse_ds) = optimal::coarsen_periodic(&curvature, ds, spacing);
         let omega_max = api::steering_rate_limit(&track_slug, &coarse_curvature, coarse_ds);
-        let (v_final, obj_lap_time, ds_coarse) = optimal::solve_min_time(&curvature, ds, &parameters, spacing, &drs_s, &drs_open, omega_max)
-            .unwrap_or_else(|e| panic!("{}", e));
+        let inputs = optimal::SolveInputs {
+            curvature: &curvature,
+            full_ds: ds,
+            params: &parameters,
+            spacing,
+            drs_s: &drs_s,
+            drs_open: &drs_open,
+            omega_max,
+        };
+        let (v_final, obj_lap_time, ds_coarse) =
+            optimal::solve_min_time(&inputs).unwrap_or_else(|e| panic!("{}", e));
         let minutes = (obj_lap_time / 60.0) as u32;
         let seconds = obj_lap_time % 60.0;
         println!("Lap time (optimal, objective value): {}:{:06.3}", minutes, seconds);
@@ -72,11 +81,20 @@ fn main() {
         let velocity_ms: Vec<f64> = result.speed_kmh.iter().map(|v| v / 3.6).collect();
         solver::export_velocity_csv(&velocity_ms, ds_coarse, Path::new(&simulated_lap_racingline_path)).unwrap();
 
-        track::export_racing_line_csv(
-            &result.x_ref, &result.y_ref, &result.x_line, &result.y_line,
-            &result.x_left, &result.y_left, &result.x_right, &result.y_right,
-            &result.n_profile, &velocity_ms, ds_coarse, Path::new(&racingline_xy_path),
-        ).unwrap();
+        let line = track::RacingLinePath {
+            x_ref: &result.x_ref,
+            y_ref: &result.y_ref,
+            x_line: &result.x_line,
+            y_line: &result.y_line,
+            x_left: &result.x_left,
+            y_left: &result.y_left,
+            x_right: &result.x_right,
+            y_right: &result.y_right,
+            n_profile: &result.n_profile,
+            velocity: &velocity_ms,
+            ds: ds_coarse,
+        };
+        track::export_racing_line_csv(&line, Path::new(&racingline_xy_path)).unwrap();
         println!("Exported racing-line X/Y path -> {}", racingline_xy_path);
 
         return;

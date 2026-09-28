@@ -467,33 +467,36 @@ pub fn offset_line(points: &[Point], n_profile: &[f64]) -> (Vec<f64>, Vec<f64>) 
     (x_out, y_out)
 }
 
-pub fn export_racing_line_csv(
-    x_ref: &[f64],
-    y_ref: &[f64],
-    x_line: &[f64],
-    y_line: &[f64],
-    x_left: &[f64],
-    y_left: &[f64],
-    x_right: &[f64],
-    y_right: &[f64],
-    n_profile: &[f64],
-    velocity: &[f64],
-    ds: f64,
-    path: &Path,
-) -> Result<(), Box<dyn Error>> {
+/// One solved racing line, ready to write out: the reference line, the driven line, both
+/// boundaries, the lateral offset and the speed, all sampled on the same coarse grid.
+pub struct RacingLinePath<'a> {
+    pub x_ref: &'a [f64],
+    pub y_ref: &'a [f64],
+    pub x_line: &'a [f64],
+    pub y_line: &'a [f64],
+    pub x_left: &'a [f64],
+    pub y_left: &'a [f64],
+    pub x_right: &'a [f64],
+    pub y_right: &'a [f64],
+    pub n_profile: &'a [f64],
+    pub velocity: &'a [f64],
+    pub ds: f64,
+}
+
+pub fn export_racing_line_csv(line: &RacingLinePath, path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
     writeln!(writer, "s,x_ref,y_ref,x_line,y_line,x_left,y_left,x_right,y_right,n,speed_kmh")?;
 
-    for i in 0..x_ref.len() {
-        let s = i as f64 * ds;
+    for i in 0..line.x_ref.len() {
+        let s = i as f64 * line.ds;
         writeln!(
             writer,
             "{},{},{},{},{},{},{},{},{},{},{}",
-            s, x_ref[i], y_ref[i], x_line[i], y_line[i],
-            x_left[i], y_left[i], x_right[i], y_right[i],
-            n_profile[i], velocity[i] * 3.6,
+            s, line.x_ref[i], line.y_ref[i], line.x_line[i], line.y_line[i],
+            line.x_left[i], line.y_left[i], line.x_right[i], line.y_right[i],
+            line.n_profile[i], line.velocity[i] * 3.6,
         )?;
     }
 

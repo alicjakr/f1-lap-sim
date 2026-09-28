@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::optimal::{coarsen_periodic, resample_bounds, solve_min_time, solve_racing_line};
+use crate::optimal::{coarsen_periodic, resample_bounds, solve_min_time, solve_racing_line, SolveInputs};
 use crate::solver::CarParams;
 use crate::track::{
     fit_periodic_bspline, load_aero_params, load_boundaries, load_drs_zones,
@@ -211,18 +211,24 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
     let (coarse_curvature, coarse_ds) = coarsen_periodic(&curvature, RESAMPLE_DS_M, spacing);
     let omega_max = steering_rate_limit(track, &coarse_curvature, coarse_ds);
 
-    let (v_final, n_profile, lap_time_s, ds_coarse) = solve_racing_line(
-        &curvature, RESAMPLE_DS_M, &params, spacing, &bound_s, &n_left, &n_right, &drs_s,
-        &drs_open, omega_max,
-    )
-    .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
+    let inputs = SolveInputs {
+        curvature: &curvature,
+        full_ds: RESAMPLE_DS_M,
+        params: &params,
+        spacing,
+        drs_s: &drs_s,
+        drs_open: &drs_open,
+        omega_max,
+    };
+    let (v_final, n_profile, lap_time_s, ds_coarse) =
+        solve_racing_line(&inputs, &bound_s, &n_left, &n_right)
+            .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
 
     let mean_abs_n = n_profile.iter().map(|n| n.abs()).sum::<f64>() / n_profile.len() as f64;
     let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
 
-    let (_, fixed_line_time_s, _) =
-        solve_min_time(&curvature, RESAMPLE_DS_M, &params, spacing, &drs_s, &drs_open, omega_max)
-            .map_err(|e| format!("fixed-line solve for {:?}: {}", track, e))?;
+    let (_, fixed_line_time_s, _) = solve_min_time(&inputs)
+        .map_err(|e| format!("fixed-line solve for {:?}: {}", track, e))?;
 
     // Same grid the solver used, so index i here lines up with n_profile[i].
     let xs: Vec<f64> = resampled.iter().map(|p| p.x).collect();
