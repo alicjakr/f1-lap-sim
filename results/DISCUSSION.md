@@ -671,6 +671,9 @@ Fix the corridor and add a vehicle model, and the ordering should reverse: the r
 becomes a genuine minimum-lap-time simulation rather than "the fastest way to drive one
 driver's line".
 
+(Both figures in this section are as measured at V7. V8 below adds the hybrid's energy
+budget, which moves the fixed line to +4.6% and the racing line to −7.6%.)
+
 The obvious next step would be a fuller vehicle model — quasi-steady load transfer with
 load-sensitive tires, then a single-track model with yaw dynamics. Both were sized before
 building either, and **neither can close this gap**. Bounding the curvature rate at the
@@ -688,3 +691,87 @@ this needs the corridor's *asymmetry* (at an apex the inside edge is at the driv
 2.5 m beyond it), which needs track-edge geometry the OSM export doesn't currently provide,
 not a better car model. A fuller vehicle model remains worth building for its own sake; it
 is not the fix for this.
+
+---
+
+---
+
+# V8 — Spending the Hybrid: an Energy Budget in the Solver
+
+## The car had been getting the MGU-K for free
+
+`p_engine` was 1015 W/kg — a ~625 kW ICE plus a 120 kW MGU-K — available at every metre of
+the lap. The ICE part is fair: it's fuel-flow limited and runs continuously. The MGU-K part
+isn't. It draws from an energy store the 2018 regulations cap at **4 MJ of deployment per
+lap**, which at full power is about 33 seconds, not a whole lap. The model was handing the
+car roughly twice the hybrid energy it was allowed, everywhere, for free.
+
+The fix keeps the ICE as a constant and makes deployment a control the solver places:
+
+```
+u <= (p_ice + p_k(s))/sqrt(x) - c_d*x        p_k in [0, p_mguk]
+sum over the lap of  ds*p_k/sqrt(x)  <=  4 MJ/kg-of-car
+```
+
+Energy is power times time, and time over one step is `ds/v`, which is where the
+`ds*p_k/sqrt(x)` comes from. That's one new variable per point and exactly one new
+constraint for the whole lap — the first constraint in this model that isn't pointwise.
+"Where do you spend a fixed budget for the most lap time" is the same class of question the
+solver already answers, so it fits the existing structure rather than fighting it.
+
+Harvesting is *not* modelled: the lap starts with its budget rather than earning it under
+braking. Deployment is also free to be spent anywhere, where a real power unit has
+constraints on when it can deliver. Both are documented simplifications, not oversights.
+
+## What it cost, and why the pattern is the evidence
+
+| | fixed line vs real poles |
+|---|---|
+| before (hybrid free all lap) | +3.8% |
+| after (4 MJ/lap budget) | **+4.6%** |
+
+Laps got **slower**, which is the point — the model was flattering itself with energy the
+car doesn't have. The mean cost is 0.72 s, but the interesting part is how unevenly it
+lands:
+
+| track | before | after | cost |
+|---|---|---|---|
+| Monaco | 75.819 | 75.830 | +0.01 s |
+| Interlagos | 73.761 | 73.914 | +0.15 s |
+| Hungaroring | 77.594 | 77.844 | +0.25 s |
+| … | | | |
+| Monza | 83.492 | 84.526 | +1.03 s |
+| Suzuka | 88.050 | 89.254 | +1.20 s |
+| Baku | 97.599 | 98.895 | +1.30 s |
+| Spa | 104.665 | 106.206 | +1.54 s |
+
+Monaco pays a hundredth of a second; Spa pays a second and a half. That ordering is the
+check: deployment only matters where the car is power-limited, and Monaco is grip-limited
+almost everywhere while Spa and Baku are long full-throttle runs. A change that cost every
+track the same amount would have meant something was wrong.
+
+The other check is the limiting case. Set the budget to unlimited and Monza solves to
+1:23.492 — the pre-ERS number to the millisecond. Set it to zero (ICE only) and it's
+1:26.891. The real budget sits between them at 1:24.526, so the constraint is genuinely
+binding and it does nothing else.
+
+## One bug, and what actually caught it
+
+The racing line's budget row never had its upper bound set, so it kept whatever was in the
+buffer — zero — and the racing line ran on the ICE alone, with no deployment at all. It
+surfaced as the racing line coming out *slower* than the fixed line at zero track width,
+which is impossible: at zero width they are the same problem. A dead-code warning on the
+unused `ers_budget` field confirmed it.
+
+Worth recording as a method note: the lap times it produced looked perfectly plausible. What
+caught it was a check that asserts a *relationship* — racing line equals fixed line when
+there is no room to move — rather than any number looking wrong on its own.
+`python_scripts/check_solver.py` exists for exactly this.
+
+## Still open here
+
+- **No harvesting.** The budget is granted, not earned, so a lap with little braking gets
+  the same 4 MJ as one with a lot.
+- **Deployment can be spent anywhere.** A real power unit has limits on when it can deliver
+  that this doesn't represent, which makes the model slightly generous.
+- The gap that remains after this is still the one V7 identified: the corridor, not the car.
