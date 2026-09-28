@@ -141,10 +141,15 @@ and (in `racingline` mode) the mean/max lateral offset used and the delta agains
 fixed-line baseline.
 
 Written to `data/`:
+- `<slug>_racingline_path.csv` — X/Y racing line, boundaries, and speed. Read by
+  `plot_racing_line.py`.
 - `<slug>_curvature_debug.csv` — resampled curvature profile
 - `<slug>_simulated_lap_optimal.csv` / `<slug>_simulated_lap_racingline.csv` — velocity
   vs. distance
-- `<slug>_racingline_path.csv` — X/Y racing line, boundaries, and speed (for plotting)
+
+The last two are debug output: nothing in the repo reads them, they're written on every
+run for inspecting a solve by hand. The curvature profile in particular is what you want
+when a track's lap time looks wrong — it's the input the whole solve rests on.
 
 ### Required per-track input data (from `data/`)
 
