@@ -22,6 +22,10 @@ fastest lap in Q by any driver -- not necessarily the same driver/lap used to ex
 track's geometry) rather than hardcoded, so this stays correct if FastF1's own data is ever
 corrected upstream. Cached locally after the first run like every other script here.
 
+src/api.rs keeps a static copy of the same figures (POLE_TIME_2018) so the web UI can show
+them without a network call. This script is the authority; if the two disagree, that table
+is the stale one.
+
 Usage:
   python validate_pole_times.py                  # all 15 working tracks
   python validate_pole_times.py --track monaco    # just one

@@ -19,9 +19,14 @@ const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);
 const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082);
 const DRS_DRAG_REDUCTION: f64 = 0.88;
 
-// Real 2018 qualifying pole time per track (session.laps.pick_fastest() in Q, fetched via
-// FastF1 -- same source/methodology as python_scripts/validate_pole_times.py), in seconds.
-// Historical fact, not derived data, so it's a static table rather than a data/ export.
+// Real 2018 qualifying pole time per track, in seconds: the outright fastest lap in Q by
+// any driver (session.laps.pick_fastest()), fetched once via FastF1. A historical fact
+// rather than derived data, so it lives here as a table instead of a data/ export -- the
+// web UI needs it without a network round-trip.
+//
+// The same figures are fetched live by python_scripts/validate_pole_times.py, which is the
+// authority: if the two ever disagree, FastF1 has corrected something upstream and these
+// values are the stale copy.
 const POLE_TIME_2018: &[(&str, f64)] = &[
     ("bahrain", 87.958),
     ("baku", 101.498),
