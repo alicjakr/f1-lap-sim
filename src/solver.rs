@@ -12,21 +12,33 @@ pub struct CarParams {
     pub c_l: f64,        // downforce coefficient per unit mass (m⁻¹)
     pub c_d: f64,        // drag coefficient per unit mass (m⁻¹), DRS closed
     pub c_d_drs: f64,    // drag coefficient per unit mass (m⁻¹), DRS open (lower than c_d)
-    pub p_engine: f64,   // engine power per unit mass (W/kg)
+    // Power per unit mass (W/kg), split because only one half is always available:
+    // the ICE runs all lap (fuel-flow limited), while the MGU-K draws from an energy
+    // store the regulations cap per lap -- see SolveInputs::ers_budget in optimal.rs.
+    pub p_ice: f64,
+    pub p_mguk: f64,
+}
+
+impl CarParams {
+    /// Peak power with the MGU-K deploying: what the car can make when energy isn't the
+    /// binding constraint, e.g. at top speed on the longest straight.
+    pub fn p_peak(&self) -> f64 {
+        self.p_ice + self.p_mguk
+    }
 }
 
 
 // Top speed the car can sustain in a straight line, from its own power/drag balance
 // (a_available = P/v - c_d*v² = 0), rather than read off a real lap's telemetry.
 pub fn top_speed(params: &CarParams) -> f64 {
-    (params.p_engine / params.c_d).cbrt()
+    (params.p_peak() / params.c_d).cbrt()
 }
 
 // Top speed with DRS open (lower drag, so higher than top_speed above) -- used to size the
 // optimal.rs solvers' velocity upper bound so a DRS zone's real speed potential isn't
 // clipped by a bound sized off the DRS-closed drag alone.
 pub fn top_speed_drs(params: &CarParams) -> f64 {
-    (params.p_engine / params.c_d_drs).cbrt()
+    (params.p_peak() / params.c_d_drs).cbrt()
 }
 
 
@@ -69,7 +81,7 @@ pub fn forward_pass(curvature: &[f64], v_backward: &[f64], params: &CarParams, d
         let a_lat = v[i-1].powi(2) * curvature[i-1].abs();
         let ratio = (a_lat / (params.mu_lat * g_eff)).min(1.0);
         let a_lon = params.mu_lon * g_eff * (1.0 - ratio.powi(2)).sqrt();
-        let a_available = (a_lon.min(params.p_engine / v[i-1]) - params.c_d * v[i-1].powi(2)).max(0.0);
+        let a_available = (a_lon.min(params.p_peak() / v[i-1]) - params.c_d * v[i-1].powi(2)).max(0.0);
         v[i] = v[i].min((v[i-1].powi(2) + 2.0 * a_available * ds).sqrt())
     }
 

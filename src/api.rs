@@ -19,6 +19,16 @@ const MED_DOWNFORCE: (f64, f64) = (0.0029, 0.0010);
 const LOW_DOWNFORCE: (f64, f64) = (0.0024, 0.00082);
 const DRS_DRAG_REDUCTION: f64 = 0.88;
 
+// 2018 power unit, per unit mass (734 kg): a ~625 kW ICE that runs all lap, plus a 120 kW
+// MGU-K that draws from an energy store the regulations limit to 4 MJ of deployment per
+// lap -- about 33 s at full power, not the whole lap. Harvesting isn't modelled: the lap
+// simply starts with its budget. Together these are the 1015 W/kg this used to treat as
+// continuously available, which flattered every lap time by roughly the MGU-K's whole
+// contribution.
+const P_ICE: f64 = 625_000.0 / 734.0;
+const P_MGUK: f64 = 120_000.0 / 734.0;
+pub const ERS_BUDGET_J_PER_KG: f64 = 4_000_000.0 / 734.0;
+
 // Real 2018 qualifying pole time per track, in seconds: the outright fastest lap in Q by
 // any driver (session.laps.pick_fastest()), fetched once via FastF1. A historical fact
 // rather than derived data, so it lives here as a table instead of a data/ export -- the
@@ -98,7 +108,8 @@ pub fn load_car_params(track: &str) -> CarParams {
         c_l,
         c_d,
         c_d_drs: c_d * DRS_DRAG_REDUCTION,
-        p_engine: 1015.0,
+        p_ice: P_ICE,
+        p_mguk: P_MGUK,
     }
 }
 
@@ -224,6 +235,7 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
         drs_s: &drs_s,
         drs_open: &drs_open,
         omega_max,
+        ers_budget: Some(ERS_BUDGET_J_PER_KG),
     };
     let (v_final, n_profile, lap_time_s, ds_coarse) =
         solve_racing_line(&inputs, &bound_s, &n_left, &n_right)

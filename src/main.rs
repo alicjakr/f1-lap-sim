@@ -49,6 +49,7 @@ fn main() {
             drs_s: &drs_s,
             drs_open: &drs_open,
             omega_max,
+            ers_budget: Some(api::ERS_BUDGET_J_PER_KG),
         };
         let (v_final, obj_lap_time, ds_coarse) =
             optimal::solve_min_time(&inputs).unwrap_or_else(|e| panic!("{}", e));

@@ -79,6 +79,20 @@ pub struct SolveInputs<'a> {
     /// Steering-rate limit, |dkappa/dt| in 1/(m*s) -- see api::steering_rate_limit. None
     /// leaves the path free to change direction as fast as the grid allows.
     pub omega_max: Option<f64>,
+    /// MGU-K deployment allowed per lap, in J/kg. The solver chooses *where* to spend it;
+    /// None means unlimited, i.e. peak power all lap.
+    pub ers_budget: Option<f64>,
+}
+
+/// Deployment to start the solve from: the constant power that spends exactly the budget
+/// over the warm-start lap (energy = power * time, so p = E / T), so Ipopt begins inside
+/// the budget instead of three times over it.
+fn initial_deployment(v_init: &[f64], ds: f64, budget: f64, p_mguk: f64) -> f64 {
+    if !budget.is_finite() {
+        return p_mguk;
+    }
+    let lap_time: f64 = v_init.iter().map(|v| ds / v).sum();
+    (budget / lap_time).min(p_mguk)
 }
 
 fn check_status(status: SolveStatus) -> Result<(), String> {
@@ -97,8 +111,10 @@ struct MinTimeProblem {
     x_min: f64,
     x_max: Vec<f64>, // per point: the global cap, tightened by the steering-rate limit
     u_bound: f64,
+    ers_budget: f64, // J/kg per lap; f64::INFINITY when unlimited
     initial_x: Vec<f64>,
     initial_u: Vec<f64>,
+    initial_pk: f64,
 }
 
 impl MinTimeProblem {
@@ -113,22 +129,27 @@ impl MinTimeProblem {
 
 impl BasicProblem for MinTimeProblem {
     fn num_variables(&self) -> usize {
-        2 * self.n
+        3 * self.n
     }
 
     fn bounds(&self, x_l: &mut [Number], x_u: &mut [Number]) -> bool {
-        for i in 0..self.n {
+        let n = self.n;
+        for i in 0..n {
             x_l[i] = self.x_min;
             x_u[i] = self.x_max[i];
-            x_l[self.n + i] = -self.u_bound;
-            x_u[self.n + i] = self.u_bound;
+            x_l[n + i] = -self.u_bound;
+            x_u[n + i] = self.u_bound;
+            x_l[2 * n + i] = 0.0; // MGU-K deployment, W/kg
+            x_u[2 * n + i] = self.params.p_mguk;
         }
         true
     }
 
     fn initial_point(&self, x: &mut [Number]) -> bool {
-        x[0..self.n].copy_from_slice(&self.initial_x);
-        x[self.n..2 * self.n].copy_from_slice(&self.initial_u);
+        let n = self.n;
+        x[0..n].copy_from_slice(&self.initial_x);
+        x[n..2 * n].copy_from_slice(&self.initial_u);
+        x[2 * n..3 * n].fill(self.initial_pk);
         true
     }
 
@@ -141,18 +162,21 @@ impl BasicProblem for MinTimeProblem {
         for i in 0..self.n {
             grad_f[i] = -0.5 * self.ds * x[i].powf(-1.5);
             grad_f[self.n + i] = 0.0;
+            grad_f[2 * self.n + i] = 0.0;
         }
         true
     }
 }
 
 impl ConstrainedProblem for MinTimeProblem {
+    // The last row is the lap's energy budget: one constraint over every point, not one
+    // per point.
     fn num_constraints(&self) -> usize {
-        3 * self.n
+        3 * self.n + 1
     }
 
     fn num_constraint_jacobian_non_zeros(&self) -> usize {
-        8 * self.n
+        11 * self.n
     }
 
     fn constraint_bounds(&self, g_l: &mut [Number], g_u: &mut [Number]) -> bool {
@@ -164,11 +188,16 @@ impl ConstrainedProblem for MinTimeProblem {
             g_l[2 * self.n + i] = -1e20; // power ceiling: <= 0
             g_u[2 * self.n + i] = 0.0;
         }
+        g_l[3 * self.n] = -1e20; // energy deployed over the lap: <= budget
+        g_u[3 * self.n] = self.ers_budget;
         true
     }
 
     fn constraint(&self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-        let (xs, us) = x.split_at(self.n);
+        let n = self.n;
+        let xs = &x[0..n];
+        let us = &x[n..2 * n];
+        let pks = &x[2 * n..3 * n];
         for i in 0..self.n {
             let ip1 = self.next(i);
             g[i] = xs[ip1] - xs[i] - (us[i] + us[ip1]) * self.ds;
@@ -182,8 +211,11 @@ impl ConstrainedProblem for MinTimeProblem {
         }
         for i in 0..self.n {
             g[2 * self.n + i] =
-                us[i] - self.params.p_engine / xs[i].sqrt() + self.c_d[i] * xs[i];
+                us[i] - (self.params.p_ice + pks[i]) / xs[i].sqrt() + self.c_d[i] * xs[i];
         }
+        // Energy = power * time, and time over one step is ds/v, so deployment costs
+        // ds*p_k/sqrt(x) per point.
+        g[3 * n] = (0..n).map(|i| self.ds * pks[i] / xs[i].sqrt()).sum();
         true
     }
 
@@ -216,7 +248,7 @@ impl ConstrainedProblem for MinTimeProblem {
             jcol[k] = (self.n + i) as Index;
             k += 1;
         }
-        // power row 2n+i: depends on x_i, u_i only
+        // power row 2n+i: x_i, u_i, and the deployment that raises the ceiling
         for i in 0..self.n {
             let row = (2 * self.n + i) as Index;
             irow[k] = row;
@@ -225,12 +257,27 @@ impl ConstrainedProblem for MinTimeProblem {
             irow[k] = row;
             jcol[k] = (self.n + i) as Index;
             k += 1;
+            irow[k] = row;
+            jcol[k] = (2 * self.n + i) as Index;
+            k += 1;
+        }
+        // budget row: every x_i and every p_k
+        for i in 0..self.n {
+            irow[k] = (3 * self.n) as Index;
+            jcol[k] = i as Index;
+            k += 1;
+            irow[k] = (3 * self.n) as Index;
+            jcol[k] = (2 * self.n + i) as Index;
+            k += 1;
         }
         true
     }
 
     fn constraint_jacobian_values(&self, x: &[Number], _new_x: bool, vals: &mut [Number]) -> bool {
-        let (xs, us) = x.split_at(self.n);
+        let n = self.n;
+        let xs = &x[0..n];
+        let us = &x[n..2 * n];
+        let pks = &x[2 * n..3 * n];
         let mut k = 0;
         for _ in 0..self.n {
             vals[k] = -1.0;
@@ -261,12 +308,21 @@ impl ConstrainedProblem for MinTimeProblem {
             vals[k] = de_du;
             k += 1;
         }
-        // Power P(x,u) = u - p_engine/sqrt(x) + c_d*x
+        // Power P(x,u,p_k) = u - (p_ice + p_k)/sqrt(x) + c_d*x
         for i in 0..self.n {
-            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.c_d[i];
+            let dp_dx = 0.5 * (self.params.p_ice + pks[i]) * xs[i].powf(-1.5) + self.c_d[i];
             vals[k] = dp_dx;
             k += 1;
             vals[k] = 1.0;
+            k += 1;
+            vals[k] = -xs[i].powf(-0.5);
+            k += 1;
+        }
+        // Budget B = sum(ds*p_k/sqrt(x))
+        for i in 0..n {
+            vals[k] = -0.5 * self.ds * pks[i] * xs[i].powf(-1.5);
+            k += 1;
+            vals[k] = self.ds * xs[i].powf(-0.5);
             k += 1;
         }
         true
@@ -276,18 +332,20 @@ impl ConstrainedProblem for MinTimeProblem {
     // and (n+i,i) -- row=n+i >= col=i always holds since n>i for every i in 0..n. See the
     // module doc comment for the derivatives.
     fn num_hessian_non_zeros(&self) -> usize {
-        3 * self.n
+        4 * self.n
     }
 
     fn hessian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
         for i in 0..self.n {
-            let k = 3 * i;
+            let k = 4 * i;
             irow[k] = i as Index;
             jcol[k] = i as Index; // (x_i, x_i)
             irow[k + 1] = (self.n + i) as Index;
             jcol[k + 1] = (self.n + i) as Index; // (u_i, u_i)
             irow[k + 2] = (self.n + i) as Index;
             jcol[k + 2] = i as Index; // (u_i, x_i)
+            irow[k + 3] = (2 * self.n + i) as Index;
+            jcol[k + 3] = i as Index; // (p_k_i, x_i)
         }
         true
     }
@@ -300,7 +358,10 @@ impl ConstrainedProblem for MinTimeProblem {
         lambda: &[Number],
         vals: &mut [Number],
     ) -> bool {
-        let (xs, us) = x.split_at(self.n);
+        let n = self.n;
+        let xs = &x[0..n];
+        let us = &x[n..2 * n];
+        let pks = &x[2 * n..3 * n];
         for i in 0..self.n {
             let l = self.params.mu_lat;
             let m = self.params.mu_lon;
@@ -311,6 +372,7 @@ impl ConstrainedProblem for MinTimeProblem {
             let w = us[i] + c_d * xs[i];
             let lambda_ellipse = lambda[self.n + i];
             let lambda_power = lambda[2 * self.n + i];
+            let lambda_budget = lambda[3 * n];
 
             let d2f_dx2 = 0.75 * self.ds * xs[i].powf(-2.5);
             let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
@@ -319,15 +381,22 @@ impl ConstrainedProblem for MinTimeProblem {
                     * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
                         - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
                     / m.powi(2);
-            let d2p_dx2 = -0.75 * self.params.p_engine * xs[i].powf(-2.5);
+            let d2p_dx2 = -0.75 * (self.params.p_ice + pks[i]) * xs[i].powf(-2.5);
             let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
             let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
                 - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
+            // Budget row: d2B/dx2 = 0.75*ds*p_k*x^-2.5, d2B/dp_k dx = -0.5*ds*x^-1.5.
+            let d2b_dx2 = 0.75 * self.ds * pks[i] * xs[i].powf(-2.5);
 
-            let k = 3 * i;
-            vals[k] = obj_factor * d2f_dx2 + lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2;
+            let k = 4 * i;
+            vals[k] = obj_factor * d2f_dx2
+                + lambda_ellipse * d2e_dx2
+                + lambda_power * d2p_dx2
+                + lambda_budget * d2b_dx2;
             vals[k + 1] = lambda_ellipse * d2e_du2;
             vals[k + 2] = lambda_ellipse * d2e_dxdu;
+            vals[k + 3] = lambda_power * 0.5 * xs[i].powf(-1.5)
+                - lambda_budget * 0.5 * self.ds * xs[i].powf(-1.5);
         }
         true
     }
@@ -341,7 +410,7 @@ impl ConstrainedProblem for MinTimeProblem {
 /// Returns (velocity profile, lap time, coarse ds), or Err if Ipopt didn't converge.
 pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), String> {
     let SolveInputs { curvature: curvature_full, full_ds, params, spacing: target_spacing,
-                      drs_s, drs_open, omega_max } = *inputs;
+                      drs_s, drs_open, omega_max, ers_budget } = *inputs;
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
@@ -403,6 +472,8 @@ pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), Stri
         x_min,
         x_max,
         u_bound,
+        ers_budget: ers_budget.unwrap_or(f64::INFINITY),
+        initial_pk: initial_deployment(&v_init, ds, ers_budget.unwrap_or(f64::INFINITY), params.p_mguk),
         initial_x,
         initial_u,
     };
@@ -532,6 +603,8 @@ struct RacingLineProblem {
     kappa_bound: f64,
     // (omega_max * ds)^2: bounds (kappa[i+1] - kappa[i])^2 * x[i], i.e. |dkappa/ds|*v.
     rate_bound_sq: f64,
+    ers_budget: f64, // J/kg per lap; f64::INFINITY when unlimited
+    initial_pk: f64,
     n_left: Vec<f64>,
     n_right: Vec<f64>,
     initial_x: Vec<f64>,
@@ -558,7 +631,7 @@ impl RacingLineProblem {
 
 impl BasicProblem for RacingLineProblem {
     fn num_variables(&self) -> usize {
-        5 * self.n
+        6 * self.n
     }
 
     fn bounds(&self, x_l: &mut [Number], x_u: &mut [Number]) -> bool {
@@ -574,6 +647,8 @@ impl BasicProblem for RacingLineProblem {
             x_u[3 * n + i] = self.xi_bound;
             x_l[4 * n + i] = -self.kappa_bound;
             x_u[4 * n + i] = self.kappa_bound;
+            x_l[5 * n + i] = 0.0; // MGU-K deployment, W/kg
+            x_u[5 * n + i] = self.params.p_mguk;
         }
         true
     }
@@ -586,6 +661,7 @@ impl BasicProblem for RacingLineProblem {
             x[2 * n + i] = 0.0;
             x[3 * n + i] = 0.0;
             x[4 * n + i] = self.curvature[i];
+            x[5 * n + i] = self.initial_pk;
         }
         true
     }
@@ -607,18 +683,20 @@ impl BasicProblem for RacingLineProblem {
             grad_f[2 * n + i] = -self.ds * self.curvature[i] / x[i].sqrt();
             grad_f[3 * n + i] = 0.0;
             grad_f[4 * n + i] = 0.0;
+            grad_f[5 * n + i] = 0.0;
         }
         true
     }
 }
 
 impl ConstrainedProblem for RacingLineProblem {
+    // The last row is the lap's energy budget: one constraint over every point.
     fn num_constraints(&self) -> usize {
-        6 * self.n
+        6 * self.n + 1
     }
 
     fn num_constraint_jacobian_non_zeros(&self) -> usize {
-        21 * self.n
+        24 * self.n
     }
 
     fn constraint_bounds(&self, g_l: &mut [Number], g_u: &mut [Number]) -> bool {
@@ -637,6 +715,8 @@ impl ConstrainedProblem for RacingLineProblem {
             g_l[5 * n + i] = -1e20; // steering rate: (dkappa)^2 * x <= (omega*ds)^2
             g_u[5 * n + i] = self.rate_bound_sq;
         }
+        g_l[6 * n] = -1e20; // energy deployed over the lap: <= budget
+        g_u[6 * n] = self.ers_budget;
         true
     }
 
@@ -647,6 +727,7 @@ impl ConstrainedProblem for RacingLineProblem {
         let ns = &x[2 * n..3 * n];
         let xis = &x[3 * n..4 * n];
         let kappas = &x[4 * n..5 * n];
+        let pks = &x[5 * n..6 * n];
 
         for i in 0..n {
             let ip1 = self.next(i);
@@ -672,12 +753,13 @@ impl ConstrainedProblem for RacingLineProblem {
         }
         for i in 0..n {
             g[4 * n + i] =
-                us[i] - self.params.p_engine / xs[i].sqrt() + self.c_d[i] * xs[i];
+                us[i] - (self.params.p_ice + pks[i]) / xs[i].sqrt() + self.c_d[i] * xs[i];
         }
         for i in 0..n {
             let d = kappas[self.next(i)] - kappas[i];
             g[5 * n + i] = d * d * xs[i];
         }
+        g[6 * n] = (0..n).map(|i| self.ds * pks[i] / xs[i].sqrt()).sum();
         true
     }
 
@@ -720,11 +802,12 @@ impl ConstrainedProblem for RacingLineProblem {
             irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
             irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
         }
-        // power row 4n+i: d/dx_i, d/du_i
+        // power row 4n+i: d/dx_i, d/du_i, d/dp_k_i
         for i in 0..n {
             let row = (4 * n + i) as Index;
             irow[k] = row; jcol[k] = i as Index; k += 1;
             irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
+            irow[k] = row; jcol[k] = (5 * n + i) as Index; k += 1;
         }
         // steering-rate row 5n+i: d/dkappa_i, d/dkappa_{i+1}, d/dx_i
         for i in 0..n {
@@ -732,6 +815,11 @@ impl ConstrainedProblem for RacingLineProblem {
             irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
             irow[k] = row; jcol[k] = (4 * n + self.next(i)) as Index; k += 1;
             irow[k] = row; jcol[k] = i as Index; k += 1;
+        }
+        // budget row: every x_i and every p_k
+        for i in 0..n {
+            irow[k] = (6 * n) as Index; jcol[k] = i as Index; k += 1;
+            irow[k] = (6 * n) as Index; jcol[k] = (5 * n + i) as Index; k += 1;
         }
         true
     }
@@ -744,6 +832,7 @@ impl ConstrainedProblem for RacingLineProblem {
         let ns = &x[2 * n..3 * n];
         let xis = &x[3 * n..4 * n];
         let kappas = &x[4 * n..5 * n];
+        let pks = &x[5 * n..6 * n];
         let mut k = 0;
 
         for i in 0..n {
@@ -787,15 +876,20 @@ impl ConstrainedProblem for RacingLineProblem {
             vals[k] = de_dkappa; k += 1;
         }
         for i in 0..n {
-            let dp_dx = 0.5 * self.params.p_engine * xs[i].powf(-1.5) + self.c_d[i];
+            let dp_dx = 0.5 * (self.params.p_ice + pks[i]) * xs[i].powf(-1.5) + self.c_d[i];
             vals[k] = dp_dx; k += 1;
             vals[k] = 1.0; k += 1;
+            vals[k] = -xs[i].powf(-0.5); k += 1;
         }
         for i in 0..n {
             let d = kappas[self.next(i)] - kappas[i];
             vals[k] = -2.0 * d * xs[i]; k += 1;
             vals[k] = 2.0 * d * xs[i]; k += 1;
             vals[k] = d * d; k += 1;
+        }
+        for i in 0..n {
+            vals[k] = -0.5 * self.ds * pks[i] * xs[i].powf(-1.5); k += 1;
+            vals[k] = self.ds * xs[i].powf(-0.5); k += 1;
         }
         true
     }
@@ -804,14 +898,14 @@ impl ConstrainedProblem for RacingLineProblem {
     // (xi_i, n_{i+1}), and row >= col holds for all of them since the variable blocks are
     // ordered x < u < n < xi < kappa.
     fn num_hessian_non_zeros(&self) -> usize {
-        12 * self.n
+        13 * self.n
     }
 
     fn hessian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
         let n = self.n;
         for i in 0..n {
             let ip1 = self.next(i);
-            let k = 12 * i;
+            let k = 13 * i;
             irow[k] = i as Index; jcol[k] = i as Index; // (x_i, x_i)
             irow[k + 1] = (n + i) as Index; jcol[k + 1] = (n + i) as Index; // (u_i, u_i)
             irow[k + 2] = (n + i) as Index; jcol[k + 2] = i as Index; // (u_i, x_i)
@@ -827,6 +921,7 @@ impl ConstrainedProblem for RacingLineProblem {
             let (kap_a, kap_b) = (4 * n + i, 4 * n + ip1);
             irow[k + 10] = kap_a.max(kap_b) as Index; jcol[k + 10] = kap_a.min(kap_b) as Index;
             irow[k + 11] = (4 * n + i) as Index; jcol[k + 11] = self.prev(i) as Index;
+            irow[k + 12] = (5 * n + i) as Index; jcol[k + 12] = i as Index; // (p_k_i, x_i)
         }
         true
     }
@@ -844,6 +939,7 @@ impl ConstrainedProblem for RacingLineProblem {
         let xs = &x[0..n];
         let us = &x[n..2 * n];
         let kappas = &x[4 * n..5 * n];
+        let pks = &x[5 * n..6 * n];
 
         for i in 0..n {
             let ip1 = self.next(i);
@@ -867,6 +963,7 @@ impl ConstrainedProblem for RacingLineProblem {
             let lambda_xi_defect = lambda[2 * n + i];
             let lambda_ellipse = lambda[3 * n + i];
             let lambda_power = lambda[4 * n + i];
+            let lambda_budget = lambda[6 * n];
 
             let d2f_dx2 = h_i * 0.75 * ds * xs[i].powf(-2.5);
             let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
@@ -875,7 +972,8 @@ impl ConstrainedProblem for RacingLineProblem {
                     * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
                         - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
                     / m.powi(2);
-            let d2p_dx2 = -0.75 * self.params.p_engine * xs[i].powf(-2.5);
+            let d2p_dx2 = -0.75 * (self.params.p_ice + pks[i]) * xs[i].powf(-2.5);
+            let d2b_dx2 = 0.75 * self.ds * pks[i] * xs[i].powf(-2.5);
             let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
             let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
                 - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
@@ -884,8 +982,11 @@ impl ConstrainedProblem for RacingLineProblem {
                 - 4.0 * xs[i].powi(2) * kap * c_l / (l.powi(2) * g_eff.powi(3));
             let d2f_dxdn = 0.5 * ds * self.curvature[i] * xs[i].powf(-1.5);
 
-            let k = 12 * i;
-            vals[k] = obj_factor * d2f_dx2 + lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2;
+            let k = 13 * i;
+            vals[k] = obj_factor * d2f_dx2
+                + lambda_ellipse * d2e_dx2
+                + lambda_power * d2p_dx2
+                + lambda_budget * d2b_dx2;
             vals[k + 1] = lambda_ellipse * d2e_du2;
             vals[k + 2] = lambda_ellipse * d2e_dxdu;
             vals[k + 3] = lambda_ellipse * d2e_dkappa2
@@ -900,6 +1001,8 @@ impl ConstrainedProblem for RacingLineProblem {
                 (lambda_x_defect + lambda_x_defect_prev) * ds * self.curvature[i];
             vals[k + 10] = -2.0 * lambda_rate * xs[i];
             vals[k + 11] = 2.0 * lambda_rate_prev * d_prev;
+            vals[k + 12] = lambda_power * 0.5 * xs[i].powf(-1.5)
+                - lambda_budget * 0.5 * self.ds * xs[i].powf(-1.5);
         }
         true
     }
@@ -917,7 +1020,7 @@ pub fn solve_racing_line(
     n_right_full: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>, f64, f64), String> {
     let SolveInputs { curvature: curvature_full, full_ds, params, spacing: target_spacing,
-                      drs_s, drs_open, omega_max } = *inputs;
+                      drs_s, drs_open, omega_max, ers_budget } = *inputs;
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
     let n = curvature.len();
 
@@ -965,6 +1068,8 @@ pub fn solve_racing_line(
         xi_bound,
         kappa_bound,
         rate_bound_sq: omega_max.map(|w| (w * ds).powi(2)).unwrap_or(1e20),
+        ers_budget: ers_budget.unwrap_or(f64::INFINITY),
+        initial_pk: initial_deployment(&v_init, ds, ers_budget.unwrap_or(f64::INFINITY), params.p_mguk),
         n_left,
         n_right,
         initial_x,
