@@ -121,7 +121,11 @@ def git_state() -> tuple[str, bool]:
     def git(*args):
         return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout.strip()
     try:
-        return git("rev-parse", "--short", "HEAD"), bool(git("status", "--porcelain"))
+        # Exclude the log itself: appending to it dirties the tree, so counting it would
+        # pin the flag to 1 from the second run onwards and tell us nothing.
+        changed = [line for line in git("status", "--porcelain").splitlines()
+                   if line[3:].strip() != str(LOG_PATH)]
+        return git("rev-parse", "--short", "HEAD"), bool(changed)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown", True
 
