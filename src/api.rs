@@ -109,7 +109,24 @@ pub fn load_car_params(track: &str) -> CarParams {
         "baku" | "montreal" | "redbullring" | "spa" | "monza" => LOW_DOWNFORCE,
         _ => MED_DOWNFORCE,
     };
-    let (c_l, c_d) = load_aero_params(Path::new(&aero_params_path)).unwrap_or((c_l, c_d));
+    // The fallback above is usable but carries a known systematic error (~+16% on lap time,
+    // see results/DISCUSSION.md), and it used to apply silently: six circuits ran on it
+    // unnoticed until a validation sweep spread the gap out by track. Say so instead.
+    let (c_l, c_d) = match load_aero_params(Path::new(&aero_params_path)) {
+        Ok(derived) => derived,
+        Err(error) if Path::new(&aero_params_path).exists() => {
+            eprintln!("WARNING: {} exists but could not be read ({}) -- falling back to the \
+                       coarse 3-tier downforce guess for {:?}.", aero_params_path, error, track);
+            (c_l, c_d)
+        }
+        Err(_) => {
+            eprintln!("WARNING: no {} -- using the coarse 3-tier downforce guess for {:?}, \
+                       which carries a known ~+16% lap-time error. Fix with \
+                       `python python_scripts/derive_downforce.py --track {}`.",
+                      aero_params_path, track, track);
+            (c_l, c_d)
+        }
+    };
     CarParams {
         mu_lat: 1.6,
         mu_lon: 1.55,

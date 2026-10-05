@@ -25,9 +25,17 @@ target
 
 /target
 
-# FastF1 cache and exported data
+# FastF1 cache and exported data. data/ is listed as /data/* rather than /data/ so the
+# derived aero coefficients can be re-included below -- git cannot un-ignore a file whose
+# parent directory is itself ignored.
 /cache/
-/data/
+/data/*
+
+# ...except the per-track aero coefficients: two numbers per circuit, ~50 bytes each, and
+# they are car-model parameters rather than bulk data. A missing one falls back to the coarse
+# 3-tier downforce guess and its known ~+16% lap-time error, so the physics is not
+# reproducible without them (see src/api.rs load_car_params).
+!/data/*_aero_params.csv
 
 # Compiled binary in project root
 /main
