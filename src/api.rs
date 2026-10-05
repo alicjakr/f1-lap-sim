@@ -46,12 +46,15 @@ const POLE_TIME_2018: &[(&str, f64)] = &[
     ("hungaroring", 76.666),
     ("interlagos", 67.281),
     ("monaco", 70.810),
+    ("melbourne", 81.164),
+    ("mexico", 74.759),
     ("montreal", 70.764),
     ("monza", 79.119),
     ("paulricard", 90.029),
     ("redbullring", 63.130),
     ("shanghai", 91.095),
     ("silverstone", 85.892),
+    ("sochi", 91.387),
     ("singapore", 96.015),
     ("spa", 101.501),
     ("suzuka", 87.760),
@@ -62,22 +65,27 @@ pub fn pole_time_2018(track: &str) -> Option<f64> {
     POLE_TIME_2018.iter().find(|(slug, _)| *slug == track).map(|(_, t)| *t)
 }
 
-// Tracks with a boundaries CSV present but known-bad data, documented in
-// results/DISCUSSION.md's "6 known limitations" table -- kept solvable rather than hidden
-// (the CLI already ran them before this UI existed), but flagged so the UI can warn.
+// Circuits whose corridor is an assumption rather than a measurement. Most tracks now get
+// per-point track widths from the TUM racetrack-database (satellite-derived, see
+// python_scripts/export_tum_boundaries.py); the four that database doesn't cover still use
+// export_osm_boundaries.py, which has no width data of its own and imputes it. Two different
+// things happen there, so the warnings differ: on the street circuits OSM's `lanes` tags give
+// a varying width, but of the public road rather than the barriered circuit; elsewhere no way
+// carries a lanes tag at all and the width is a flat 7 m guess.
+const OSM_LANES_WIDTH: &str = "Track width here comes from OpenStreetMap lane counts (lanes x 3.5 m), \
+not from measurement: this circuit isn't in the TUM racetrack-database. That is the width of the \
+public road, which is not the same as the circuit between the barriers, so the racing line has room \
+the drivers may not have had.";
+
+const OSM_FLAT_WIDTH: &str = "Track width here is an assumed flat 7 m, not measured: this circuit \
+isn't in the TUM racetrack-database, and no OpenStreetMap way for it carries a width or lane-count \
+tag. The corridor has no real shape, so the racing line is the least trustworthy of any track here.";
+
 const KNOWN_DATA_ISSUES: &[(&str, &str)] = &[
-    (
-        "bahrain",
-        "OSM boundary data is unusable here (the relation bundles multiple real track layouts, e.g. car vs. motorcycle circuit; registration residual 35-63 m). Racing line and lap time are not reliable.",
-    ),
-    (
-        "catalunya",
-        "OSM boundary data is unusable here (the relation bundles multiple real track layouts, e.g. car vs. motorcycle circuit; registration residual 35-63 m). Racing line and lap time are not reliable.",
-    ),
-    (
-        "singapore",
-        "A real corner's geometry exceeds the solver's steering-rate model limit here -- Ipopt may report success with an unreliable racing line.",
-    ),
+    ("baku", OSM_LANES_WIDTH),
+    ("monaco", OSM_FLAT_WIDTH),
+    ("paulricard", OSM_FLAT_WIDTH),
+    ("singapore", OSM_LANES_WIDTH),
 ];
 
 pub fn known_data_issue(track: &str) -> Option<&'static str> {

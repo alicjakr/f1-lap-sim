@@ -48,11 +48,10 @@ REPO = Path(__file__).resolve().parent.parent
 BINARY = REPO / "target/release/f1-lap-sim"
 DATA = REPO / "data"
 
-# Tracks whose boundary data is documented as unusable, so a failure here would be the
-# known data problem rather than a solver regression (see DISCUSSION.md V6's limitations
-# table): Bahrain/Catalunya bundle several track layouts, Singapore exceeds the solver's
-# steering-rate/small-angle limit.
-EXCLUDED = {"bahrain", "catalunya", "singapore"}
+# Previously this skipped Bahrain, Catalunya and Singapore, whose OpenStreetMap boundaries
+# were unusable. With measured widths from the TUM racetrack-database every circuit solves,
+# so nothing is skipped; keep the hook for the next track that turns out to be broken.
+EXCLUDED: set[str] = set()
 
 # Boundary half-widths for the pinned runs. track.rs subtracts CAR_HALF_WIDTH_M (1.0 m)
 # from each side, so 1.0 leaves the car exactly no room and 1.01 leaves it a centimetre.

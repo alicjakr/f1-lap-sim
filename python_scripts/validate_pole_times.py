@@ -44,10 +44,9 @@ import fastf1
 
 fastf1.Cache.enable_cache("cache")
 
-# slug -> official 2018 FastF1 EventName. Restricted to the 15 tracks with working OSM
-# boundary data (see python_scripts/export_osm_boundaries.py's module docstring for the
-# other 6: Bahrain/Catalunya have unusable OSM relations, Sochi/Mexico have none at all,
-# Singapore hits a real steering-rate model limit unrelated to data quality).
+# slug -> official 2018 FastF1 EventName. All 21 rounds of the season now run end to end:
+# the six that used to fail did so for want of usable boundaries, which the TUM
+# racetrack-database supplies (see python_scripts/export_tum_boundaries.py).
 TRACKS = {
     "monaco": "Monaco Grand Prix",
     "baku": "Azerbaijan Grand Prix",
@@ -64,6 +63,12 @@ TRACKS = {
     "interlagos": "Brazilian Grand Prix",
     "redbullring": "Austrian Grand Prix",
     "yasmarina": "Abu Dhabi Grand Prix",
+    "bahrain": "Bahrain Grand Prix",
+    "catalunya": "Spanish Grand Prix",
+    "melbourne": "Australian Grand Prix",
+    "mexico": "Mexican Grand Prix",
+    "singapore": "Singapore Grand Prix",
+    "sochi": "Russian Grand Prix",
 }
 
 BINARY = Path("target/release/f1-lap-sim")
