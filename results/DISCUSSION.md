@@ -775,3 +775,195 @@ there is no room to move — rather than any number looking wrong on its own.
 - **Deployment can be spent anywhere.** A real power unit has limits on when it can deliver
   that this doesn't represent, which makes the model slightly generous.
 - The gap that remains after this is still the one V7 identified: the corridor, not the car.
+
+
+# V9 — Measured Track Widths, and What Validation Spread Exposed
+
+## Real corridors, instead of an invented 7 metres
+
+Every circuit's track width had been `DEFAULT_LANES * LANE_WIDTH_M` — a flat 7 m, the same
+number everywhere, because OSM carries no width data for a racetrack. V7 built a whole
+argument on top of that number.
+
+The TUM racetrack-database (`TUMFTM/racetrack-database`, LGPL-3.0) publishes a full-scale
+centerline per circuit with per-point distances to each edge, extracted from satellite
+imagery. `python_scripts/export_tum_boundaries.py` downloads those, registers the centerline
+into the FastF1 frame with the same ICP the OSM path already used, and writes the existing
+boundary format, so the Rust side needed no changes.
+
+It covers 17 of the 21 circuits. Their measured widths run **9.4–13.9 m, mean 11.7 m** —
+every one of them wider than the 7 m that had been standing in. Registration lands at a
+3.25–4.20 m mean residual, which is the right order for a track centre against a racing
+line, and the driven lap falls inside the measured track at 100% of samples on 15 circuits
+(Melbourne 99.7%, Mexico 98.9%).
+
+Two things follow that matter more than the widths themselves.
+
+## It refuted V7's conclusion
+
+V7 ended by naming the corridor as the whole racing-line gap: the corridor was centred on a
+driven racing line, so the solver could move *inside* an apex the driver had already clipped
+and spend the same width twice. With honest widths, the racing line got **faster**, not
+slower:
+
+| | racing line vs real poles |
+|---|---|
+| invented flat 7 m (V7/V8) | −7.6% |
+| satellite-measured widths | **−10.0%** |
+
+Real circuits are wider than 7 m, so measuring them *added* room rather than removing it.
+The corridor was not the explanation. V7's reasoning was sound and its conclusion was wrong,
+because it rested on a fabricated input — which is the more useful lesson: an argument
+cannot be stronger than the weakest number it stands on.
+
+## Four circuits still have no measured width
+
+Baku, Monaco, Paul Ricard and Singapore aren't in the database, and their warnings in the UI
+had all four saying "an assumed 7 m". Measuring the files showed that was wrong for two of
+them:
+
+| circuit | corridor | source |
+|---|---|---|
+| Baku | 10.1 m mean, 7.0–17.5 | OSM `lanes` tags × 3.5 m |
+| Singapore | 11.2 m mean, 3.5–21.0 | OSM `lanes` tags × 3.5 m |
+| Monaco | 7.0 m, 3.5–7.0 | `DEFAULT_LANES` fallback |
+| Paul Ricard | 7.0 m flat | `DEFAULT_LANES` fallback |
+
+The street circuits do get a varying width — but of the *public road*, not of the circuit
+between the barriers. The two warnings now say different things, because they are different
+failures.
+
+## A log, because the numbers kept going stale
+
+`validate_pole_times.py` recomputed 42 solves per run and printed a table that then
+evaporated. The only record of any previous run was prose, and prose went quietly out of date
+— which is how the README ended up quoting +4.6%/−7.6% after both numbers had moved.
+
+Every run now appends one row per track to `results/validation_log.csv` (`run_utc`, `commit`,
+`dirty`, spacing, both lap times, the pole time, both gaps). It is tracked, unlike `data/`.
+The first useful thing it produced was a determinism check: two consecutive sweeps agreed to
+**0.000 s on all 21 tracks**, which is worth knowing before trusting any cross-run diff.
+
+The `dirty` flag records that the working tree did not match the commit, because otherwise
+the commit does not identify what produced the row. Its first version counted the log file
+itself — which logging writes — and so would have read `1` from the second run onward.
+
+## Six circuits had been silently running on the 3-tier aero fallback
+
+Enabling the six new circuits took the fixed-line mean from +4.6% to +8.5%, and the spread
+told the real story: the original fifteen sat at +1.5…+11.4%, the six newcomers at
++13.9…+21.0%. The fixed-line solve never touches the corridor — it sees curvature and car
+params and nothing else — so this could not be a boundary problem.
+
+It was six missing files. `load_car_params` prefers `data/<slug>_aero_params.csv` and falls
+back to the coarse 3-tier `HIGH/MED/LOW_DOWNFORCE` classification, and that fallback was a
+bare `unwrap_or`. The six were reproducing the exact error V6 had already measured and fixed
+for everyone else: *"the original 3-tier downforce classification showed a systematic +16.3%
+mean gap."* They were at +18.3%.
+
+| | before | after |
+|---|---|---|
+| Catalunya | +17.7% | +1.5% |
+| Mexico | +17.7% | +2.4% |
+| Bahrain | +13.9% | +3.9% |
+| Melbourne | +20.3% | +7.6% |
+| Singapore | +21.0% | +13.6% |
+| Sochi | +18.9% | +17.6% |
+
+| all 21 circuits | fixed line | stdev |
+|---|---|---|
+| before | +8.5% | 7.3% |
+| after | **+5.5%** | **5.0%** |
+
+The other fifteen moved by **0.000 s**, which is the check that the change touched only what
+it should have. The stdev is the result worth more than the mean: the gap did not just
+shrink, it became more uniform, which is what repairing a data fault looks like rather than
+tuning a number.
+
+Two fixes followed, neither of them documentation. The README already said every track needs
+`derive_downforce.py` — it was followed incompletely on six tracks and **nothing detected
+that**, which is the same class of fault as V5's silent non-converged solves: a fallback
+that is fine as a mechanism and invisible as an event. It now warns on stderr, and
+distinguishes a missing file from an unreadable one (a corrupt file had been
+indistinguishable from a healthy one). And the coefficients are now tracked in git — two
+numbers and ~50 bytes per circuit, car-model parameters that happen to be computed rather
+than typed — so a cleared `data/` cannot quietly reintroduce the gap.
+
+## The remaining gap is mostly `c_l` estimation noise
+
+Sochi survived the fix at +17.6%, a 3.5σ outlier, so it got chased down. The loss is in
+corners: **+12.1 s of +14.7 s** inside the 22% of the lap under a 200 m radius, with top
+speed nearly right (305 vs 322 km/h) and minimum speed half of reality (51 vs 103 km/h).
+Friction is the binding constraint there, at 99.3% of capacity at p95, while the
+steering-rate limit sits at 49% — so the car is at its limit and the limit is too low.
+`c_l` sets that limit, and Sochi's is the second-lowest of the 21.
+
+That generalizes, and it is the main finding of this version:
+
+| | |
+|---|---|
+| correlation of `c_l` with fixed-line gap | **−0.68** (r² = 0.47, p = 0.0006) |
+| effect of ±0.001 in `c_l` | ∓1.9 percentage points of lap time |
+
+The ordering is nearly monotonic. The two lowest-`c_l` circuits (Interlagos 0.00521, Sochi
+0.00528) are among the slowest; the two highest (Red Bull Ring 0.01087, Baku 0.01211) are the
+only two circuits the model runs *faster* than reality. Roughly half the remaining
+cross-track validation error is one estimated coefficient.
+
+And that coefficient is estimated badly. `derive_downforce.py` takes the **median of 10–25
+samples** whose interquartile spread is **2.8–3.9×**, drawn from a pool contaminated by
+curvature-fit artifacts that imply up to **42 g** of lateral acceleration. Sochi is not a
+special case; it drew near the bottom of a wide distribution, and on 21 tracks something had
+to.
+
+The obvious repair fails, which is worth recording. Rejecting samples above a physical 6 g
+ceiling throws away **67% of them**, leaves 10 of 21 circuits with too few to estimate at
+all, and lowers `c_l` on every single track. The reason is that `a_lat` is computed from real
+speed against *fitted* curvature, so the rejection criterion is correlated with the very
+error it is meant to remove: filtering keeps the low-curvature samples and biases the
+estimate downward. The noise cannot be filtered out of this estimator; the estimator has to
+change.
+
+One earlier claim in this investigation was wrong and is worth flagging, since it nearly
+stopped the search. Checking each track's single minimum corner radius suggested Sochi's
+curvature was unremarkable. The better test — the lateral g the fit demands at the real lap's
+own speed — shows Sochi still mid-pack (3.8% of samples over 6 g) while COTA is worst at
+8.1% with only a +5.7% gap. The artifacts are universal to the fit rather than Sochi's
+problem. They do the damage indirectly, by poisoning the `c_l` sample pool, not by slowing
+the car at the point where they appear.
+
+## Where that leaves it
+
+| | fixed line | racing line |
+|---|---|---|
+| 15 original circuits | +4.6% (σ 4.1%) | −10.0% |
+| 6 newly-derived circuits | +7.8% (σ 6.5%) | −9.9% |
+| **all 21 circuits** | **+5.5% (σ 5.0%)** | **−10.0%** |
+
+The two populations have converged, and the racing line now reads −10.0% on both — where the
+six previously read −2.7%, which looked like a corridor effect and was the aero fallback
+suppressing both modes at once.
+
+## What's left to resolve
+
+- **`c_l` is estimated from too few, too noisy samples.** Half the remaining fixed-line
+  error. The standard fix is a robust regression of `a_lat` against `v²` over the whole
+  corner population — hundreds of points instead of a median over sixteen. This would change
+  every validated number again, so it is the next real piece of work rather than a tidy-up.
+- **Sochi and Singapore keep a ~+6.5 pp residual** after `c_l` is accounted for (the two
+  largest of the 21; residual stdev is 3.6 pp). A second, smaller effect specific to them,
+  currently unidentified.
+- **The sub-grid weave, still open from V7.** 1 cm of track width still buys 0.3–1.1 s, and
+  the effect grows on finer grids, because the friction ellipse is enforced only at
+  collocation points. This is the leading suspect for the racing line's −10%.
+- **The racing line is an upper bound, not a prediction.** It should be read as "no faster
+  than this", and it is not yet known how much of the −10% is the weave versus a point mass
+  with no yaw inertia, no tire load sensitivity and no weight transfer.
+- **Four circuits have no measured width**, two of them using the width of a public road
+  rather than the circuit. Their racing lines are the least trustworthy here.
+- **The benchmark is not the same lap as the reference.** Geometry comes from HAM's lap;
+  `validate_pole_times.py` compares against the fastest lap by any driver. At Bahrain, Mexico
+  and Sochi in 2018 that was someone else, so the model is scored against a lap it was never
+  given the line for. Worth tenths, not seconds, but it is an apples-to-oranges comparison.
+- **No harvesting, carried from V8.** The 4 MJ budget is granted rather than earned, and
+  deployment can be placed anywhere on the lap.
