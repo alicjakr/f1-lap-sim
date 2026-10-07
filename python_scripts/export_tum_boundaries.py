@@ -8,8 +8,10 @@ on the FastF1 driven line -- which is itself a racing line. The solver therefore
 to move *inside* an apex the driver had already clipped, and spends the same track width
 twice. That is the single biggest error in `racingline` mode (see results/DISCUSSION.md V7).
 
-TUMFTM/racetrack-database (LGPL-3.0) publishes, per circuit, a full-scale centerline with
-per-point distances to each edge:
+TUMFTM/racetrack-database (LGPL-3.0), from the Chair of Automotive Technology at the
+Technical University of Munich (contact: Alexander Heilmeier; the satellite width-extraction
+algorithm is the work of Andressa de Paula Suiti), publishes per circuit a full-scale
+centerline with per-point distances to each edge:
 
     x_m, y_m, w_tr_right_m, w_tr_left_m
 
@@ -18,6 +20,12 @@ they are measured rather than assumed. Crucially the centerline is the *track* c
 driven line, so the offset between it and our reference lap is real information: it says
 where in the track the driver actually was, and that makes the corridor asymmetric -- near
 zero to the inside at an apex, wide to the outside.
+
+Two caveats their README states, both of which matter here. The centerlines are smoothed, so
+they no longer lie perfectly in the middle of the track -- which is part of why registration
+lands at a 3-4 m residual rather than nearer zero. And source quality varies by location,
+since it depends on the GPS traces and satellite imagery available for that circuit, so the
+widths are not uniformly accurate across the 17.
 
 Nothing is committed back to that repository; this only downloads from it. The CSVs are
 cached under cache/tum_tracks/ and data/ is gitignored, so their files are never
