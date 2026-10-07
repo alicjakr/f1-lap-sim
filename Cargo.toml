@@ -2,6 +2,12 @@
 name = "f1-lap-sim"
 version = "0.1.0"
 edition = "2024"
+description = "Minimum-time optimal-control lap simulator for Formula 1 circuits, validated against real 2018 pole times"
+license = "MIT"
+repository = "https://github.com/alicjakr/f1-lap-sim"
+readme = "README.md"
+keywords = ["formula1", "optimal-control", "simulation", "ipopt", "motorsport"]
+categories = ["science", "simulation"]
 
 [lib]
 name = "f1_lap_sim"
