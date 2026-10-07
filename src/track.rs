@@ -113,10 +113,10 @@ impl PeriodicBSpline {
     fn blend(&self, seg: usize, weights: [f64; 4]) -> (f64, f64) {
         let mut x = 0.0;
         let mut y = 0.0;
-        for k in 0..4 {
+        for (k, weight) in weights.iter().enumerate() {
             let (cx, cy) = self.ctrl(seg as isize - 1 + k as isize);
-            x += weights[k] * cx;
-            y += weights[k] * cy;
+            x += weight * cx;
+            y += weight * cy;
         }
         (x, y)
     }
@@ -346,7 +346,10 @@ const CAR_HALF_WIDTH_M: f64 = 1.0;
 // callers matching this against a curvature array need to interpolate, not index directly.
 // The raw offsets are narrowed by the car's half width and re-centered onto the driven line
 // (see the body) before being handed to the solver.
-pub fn load_boundaries(path: &Path) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), Box<dyn Error>> {
+/// Arc-length axis, and the left/right offset bounds at each of those points.
+pub type Boundaries = (Vec<f64>, Vec<f64>, Vec<f64>);
+
+pub fn load_boundaries(path: &Path) -> Result<Boundaries, Box<dyn Error>> {
     let reader = BufReader::new(File::open(path)?);
     let mut s: Vec<f64> = Vec::new();
     let mut n_left: Vec<f64> = Vec::new();

@@ -100,9 +100,9 @@ pub fn export_velocity_csv(velocity: &[f64], ds: f64, path: &Path) -> Result<(),
 
     writeln!(writer, "Distance,Speed")?;
 
-    for i in 0..velocity.len() {
+    for (i, v) in velocity.iter().enumerate() {
         let distance = i as f64 * ds;
-        let speed = velocity[i] * 3.6;
+        let speed = v * 3.6;
         writeln!(writer, "{},{}", distance, speed)?;
     }
 
