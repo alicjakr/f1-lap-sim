@@ -39,9 +39,16 @@ parser.add_argument("--track", default="Singapore", help="FastF1 session locatio
 parser.add_argument("--session-type", default="Q")
 parser.add_argument("--driver", default="HAM")
 parser.add_argument("--lap-number", type=int, default=None, help="Explicit lap number; default picks the fastest lap (verify its endpoint gap first)")
+parser.add_argument("--slug", default=None,
+                    help="Output filename prefix; defaults to --track lowercased. Needed where "
+                         "the identifier FastF1 resolves does not match the slug we use, e.g. "
+                         "--track Spa-Francorchamps --slug spa")
 args = parser.parse_args()
 
-slug = args.track.lower()
+# Decoupled on purpose: FastF1's matching is fuzzy and some identifiers resolve to the wrong
+# event entirely -- "spa" gives the *Spanish* GP and "Red Bull Ring" the *British* one -- so
+# the string that resolves correctly is not always the one we want as a filename prefix.
+slug = (args.slug or args.track).lower()
 
 fastf1.Cache.enable_cache("cache")
 
