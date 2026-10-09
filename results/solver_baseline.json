@@ -7,8 +7,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 79.131,
-   "fixed": 91.424,
+   "racing": 79.145,
+   "fixed": 91.193,
    "error": null
   },
   "baku": {
@@ -17,8 +17,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 86.804,
-   "fixed": 98.895,
+   "racing": 95.577,
+   "fixed": 104.152,
    "error": null
   },
   "catalunya": {
@@ -27,8 +27,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 62.348,
-   "fixed": 77.302,
+   "racing": 67.031,
+   "fixed": 80.771,
    "error": null
   },
   "cota": {
@@ -37,8 +37,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 81.93,
-   "fixed": 97.471,
+   "racing": 84.112,
+   "fixed": 100.155,
    "error": null
   },
   "hockenheim": {
@@ -47,8 +47,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 63.665,
-   "fixed": 72.844,
+   "racing": 63.37,
+   "fixed": 72.656,
    "error": null
   },
   "hungaroring": {
@@ -57,8 +57,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 63.169,
-   "fixed": 77.844,
+   "racing": 59.191,
+   "fixed": 73.719,
    "error": null
   },
   "interlagos": {
@@ -67,8 +67,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 64.7,
-   "fixed": 73.914,
+   "racing": 62.814,
+   "fixed": 71.988,
    "error": null
   },
   "melbourne": {
@@ -77,8 +77,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 71.97,
-   "fixed": 87.314,
+   "racing": 74.594,
+   "fixed": 89.49,
    "error": null
   },
   "mexico": {
@@ -87,8 +87,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 60.742,
-   "fixed": 76.582,
+   "racing": 63.249,
+   "fixed": 78.34,
    "error": null
   },
   "monaco": {
@@ -97,8 +97,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 63.069,
-   "fixed": 75.83,
+   "racing": 65.167,
+   "fixed": 77.706,
    "error": null
   },
   "montreal": {
@@ -107,8 +107,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 65.343,
-   "fixed": 75.937,
+   "racing": 67.035,
+   "fixed": 77.198,
    "error": null
   },
   "monza": {
@@ -117,8 +117,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 72.384,
-   "fixed": 84.526,
+   "racing": 71.086,
+   "fixed": 84.359,
    "error": null
   },
   "paulricard": {
@@ -127,8 +127,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 81.887,
-   "fixed": 93.622,
+   "racing": 84.315,
+   "fixed": 95.182,
    "error": null
   },
   "redbullring": {
@@ -137,8 +137,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 55.747,
-   "fixed": 61.895,
+   "racing": 59.448,
+   "fixed": 67.065,
    "error": null
   },
   "shanghai": {
@@ -147,8 +147,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 82.825,
-   "fixed": 93.066,
+   "racing": 83.114,
+   "fixed": 93.456,
    "error": null
   },
   "silverstone": {
@@ -157,8 +157,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 79.964,
-   "fixed": 95.701,
+   "racing": 79.46600000000001,
+   "fixed": 94.951,
    "error": null
   },
   "singapore": {
@@ -167,8 +167,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 92.36099999999999,
-   "fixed": 109.116,
+   "racing": 86.496,
+   "fixed": 105.0,
    "error": null
   },
   "sochi": {
@@ -177,8 +177,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 93.88900000000001,
-   "fixed": 107.439,
+   "racing": 91.79599999999999,
+   "fixed": 105.408,
    "error": null
   },
   "spa": {
@@ -187,8 +187,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 94.092,
-   "fixed": 106.206,
+   "racing": 93.761,
+   "fixed": 105.798,
    "error": null
   },
   "suzuka": {
@@ -197,8 +197,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 76.476,
-   "fixed": 89.254,
+   "racing": 78.615,
+   "fixed": 93.613,
    "error": null
   },
   "yasmarina": {
@@ -207,8 +207,8 @@
     "SolveSucceeded",
     "SolveSucceeded"
    ],
-   "racing": 86.2,
-   "fixed": 103.547,
+   "racing": 89.819,
+   "fixed": 106.968,
    "error": null
   }
  },
@@ -220,8 +220,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 75.83,
-    "fixed": 75.83,
+    "racing": 77.706,
+    "fixed": 77.706,
     "error": null
    },
    "monza": {
@@ -230,8 +230,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 84.526,
-    "fixed": 84.526,
+    "racing": 84.36,
+    "fixed": 84.359,
     "error": null
    },
    "suzuka": {
@@ -240,8 +240,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 89.254,
-    "fixed": 89.254,
+    "racing": 93.613,
+    "fixed": 93.613,
     "error": null
    }
   },
@@ -252,8 +252,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 75.524,
-    "fixed": 75.83,
+    "racing": 77.443,
+    "fixed": 77.706,
     "error": null
    },
    "monza": {
@@ -262,8 +262,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 83.977,
-    "fixed": 84.526,
+    "racing": 83.862,
+    "fixed": 84.359,
     "error": null
    },
    "suzuka": {
@@ -272,8 +272,8 @@
      "SolveSucceeded",
      "SolveSucceeded"
     ],
-    "racing": 88.124,
-    "fixed": 89.254,
+    "racing": 92.842,
+    "fixed": 93.613,
     "error": null
    }
   }
