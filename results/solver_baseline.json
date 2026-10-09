@@ -1,0 +1,281 @@
+{
+ "spacing": 5.0,
+ "tracks": {
+  "bahrain": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 79.131,
+   "fixed": 91.424,
+   "error": null
+  },
+  "baku": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 86.804,
+   "fixed": 98.895,
+   "error": null
+  },
+  "catalunya": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 62.348,
+   "fixed": 77.302,
+   "error": null
+  },
+  "cota": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 81.93,
+   "fixed": 97.471,
+   "error": null
+  },
+  "hockenheim": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 63.665,
+   "fixed": 72.844,
+   "error": null
+  },
+  "hungaroring": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 63.169,
+   "fixed": 77.844,
+   "error": null
+  },
+  "interlagos": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 64.7,
+   "fixed": 73.914,
+   "error": null
+  },
+  "melbourne": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 71.97,
+   "fixed": 87.314,
+   "error": null
+  },
+  "mexico": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 60.742,
+   "fixed": 76.582,
+   "error": null
+  },
+  "monaco": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 63.069,
+   "fixed": 75.83,
+   "error": null
+  },
+  "montreal": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 65.343,
+   "fixed": 75.937,
+   "error": null
+  },
+  "monza": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 72.384,
+   "fixed": 84.526,
+   "error": null
+  },
+  "paulricard": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 81.887,
+   "fixed": 93.622,
+   "error": null
+  },
+  "redbullring": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 55.747,
+   "fixed": 61.895,
+   "error": null
+  },
+  "shanghai": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 82.825,
+   "fixed": 93.066,
+   "error": null
+  },
+  "silverstone": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 79.964,
+   "fixed": 95.701,
+   "error": null
+  },
+  "singapore": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 92.36099999999999,
+   "fixed": 109.116,
+   "error": null
+  },
+  "sochi": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 93.88900000000001,
+   "fixed": 107.439,
+   "error": null
+  },
+  "spa": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 94.092,
+   "fixed": 106.206,
+   "error": null
+  },
+  "suzuka": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 76.476,
+   "fixed": 89.254,
+   "error": null
+  },
+  "yasmarina": {
+   "ok": true,
+   "statuses": [
+    "SolveSucceeded",
+    "SolveSucceeded"
+   ],
+   "racing": 86.2,
+   "fixed": 103.547,
+   "error": null
+  }
+ },
+ "pinned": {
+  "zero width": {
+   "monaco": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 75.83,
+    "fixed": 75.83,
+    "error": null
+   },
+   "monza": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 84.526,
+    "fixed": 84.526,
+    "error": null
+   },
+   "suzuka": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 89.254,
+    "fixed": 89.254,
+    "error": null
+   }
+  },
+  "1 cm": {
+   "monaco": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 75.524,
+    "fixed": 75.83,
+    "error": null
+   },
+   "monza": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 83.977,
+    "fixed": 84.526,
+    "error": null
+   },
+   "suzuka": {
+    "ok": true,
+    "statuses": [
+     "SolveSucceeded",
+     "SolveSucceeded"
+    ],
+    "racing": 88.124,
+    "fixed": 89.254,
+    "error": null
+   }
+  }
+ }
+}

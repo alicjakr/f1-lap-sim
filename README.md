@@ -156,9 +156,16 @@ The scripts, each with a fuller docstring at the top of its file:
   per-track later.
 - **`check_solver.py`** — the regression suite, and the thing to run after changing the
   solver: pinned-width invariants, convergence on every circuit, and a diff against a saved
-  run. Exits non-zero if something broke. There are no `cargo test` unit tests yet — correctness
-  is currently checked end-to-end through this script and `validate_pole_times.py`; proper
-  Rust-side tests and CI are planned.
+  run. Exits non-zero if something broke. `results/solver_baseline.json` is the committed
+  baseline, so `--compare results/solver_baseline.json` shows what a change moved:
+
+  ```
+  python python_scripts/check_solver.py --compare results/solver_baseline.json
+  ```
+
+  There are no `cargo test` unit tests yet — correctness is currently checked end-to-end
+  through this script and `validate_pole_times.py`; proper Rust-side tests and CI are
+  planned.
 - **`plot_racing_line.py`** — plots a solved line against the boundaries, coloured by speed.
 
 <details>
