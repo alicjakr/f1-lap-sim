@@ -17,10 +17,16 @@ systematic +16.3% mean gap (worse the more corner-heavy the track), which DRS mo
 per-track downforce derivation brought down sharply. Committed as a re-runnable script
 rather than the one-off comparisons used to develop those fixes.
 
-Real pole times are fetched live via FastF1 (session.laps.pick_fastest(), i.e. the outright
-fastest lap in Q by any driver -- not necessarily the same driver/lap used to export each
-track's geometry) rather than hardcoded, so this stays correct if FastF1's own data is ever
-corrected upstream. Cached locally after the first run like every other script here.
+The benchmark is the pole lap: session.laps.pick_fastest(), the outright fastest Q lap by
+any driver. That is the question this project asks -- how close does the solver get to the
+quickest lap anyone actually set at each 2018 round -- so it is the right target even though
+the geometry currently comes from Hamilton's lap. Where those differ (12 of the 21 rounds,
+by up to 1.8 s) the solve is pinned to one driver's line and scored against another's time;
+see results/DISCUSSION.md for why that is a geometry problem to fix at the source, not a
+benchmark to change.
+
+Fetched live via FastF1 rather than hardcoded, so it stays correct if FastF1's own data is
+ever corrected upstream. Cached locally after the first run like every other script here.
 
 src/api.rs keeps a static copy of the same figures (POLE_TIME_2018) so the web UI can show
 them without a network call. This script is the authority; if the two disagree, that table
@@ -97,8 +103,7 @@ def real_pole_seconds(event_name: str) -> float:
     session.load(telemetry=False, weather=False, messages=False)
     if session.event["EventName"] != event_name:
         raise ValueError(f"{event_name!r} resolved to {session.event['EventName']!r} -- check the name")
-    fastest = session.laps.pick_fastest()
-    return fastest["LapTime"].total_seconds()
+    return session.laps.pick_fastest()["LapTime"].total_seconds()
 
 
 def solver_seconds(slug: str) -> tuple[float, float]:
@@ -165,7 +170,8 @@ def main():
     for slug, event_name in tracks.items():
         real = real_pole_seconds(event_name)
         racing, fixed = solver_seconds(slug)
-        rows.append((slug, fixed, racing, real, (fixed - real) / real * 100, (racing - real) / real * 100))
+        rows.append((slug, fixed, racing, real,
+                     (fixed - real) / real * 100, (racing - real) / real * 100))
 
     rows.sort(key=lambda r: r[4])
     print(f"\n{'track':<13}{'fixed line':>11}{'racing line':>12}{'real pole':>11}{'fixed gap':>11}{'racing gap':>12}")

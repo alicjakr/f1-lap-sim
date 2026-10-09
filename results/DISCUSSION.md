@@ -961,9 +961,22 @@ suppressing both modes at once.
   with no yaw inertia, no tire load sensitivity and no weight transfer.
 - **Four circuits have no measured width**, two of them using the width of a public road
   rather than the circuit. Their racing lines are the least trustworthy here.
-- **The benchmark is not the same lap as the reference.** Geometry comes from HAM's lap;
-  `validate_pole_times.py` compares against the fastest lap by any driver. At Bahrain, Mexico
-  and Sochi in 2018 that was someone else, so the model is scored against a lap it was never
-  given the line for. Worth tenths, not seconds, but it is an apples-to-oranges comparison.
+- **The benchmark is not the same lap as the reference.** Geometry comes from HAM's lap,
+  while `validate_pole_times.py` scores against the fastest lap by any driver. Measured
+  rather than assumed, that is **12 of the 21 rounds**, not the three this originally said:
+  Hockenheim (VET, 1.800 s), Hungaroring (VET, 0.753), Shanghai (VET, 0.580), Monaco (RIC,
+  0.422), Bahrain (VET, 0.262), Montreal (VET, 0.232), Baku (VET, 0.179), Monza (RAI, 0.175),
+  Sochi (BOT, 0.145), Mexico (RIC, 0.135), Spa (VET, 0.052), Red Bull Ring (BOT, 0.019).
+  On those the solver is pinned to one driver's line and scored against another's time.
+
+  Scoring against HAM's own lap instead was tried and rejected: it moves the 21-circuit mean
+  only +5.5% -> +5.2%, leaves 10 circuits untouched, and makes the stdev slightly *worse*
+  (4.97 -> 5.13). It also only half-fixes the problem, because for Monza, Suzuka, Spa, Yas
+  Marina, Sochi and COTA the exported geometry is not even HAM's fastest lap -- integrating
+  ds/v over their reference traces puts them 0.9-2.2 s off it, while agreeing to ~0.05 s
+  elsewhere. The benchmark is right; **the geometry is what is wrong**, and the fix is to
+  re-export those circuits from the pole-sitter's lap. The one thing the comparison did earn:
+  Hockenheim moves +2.3% -> -0.2%, joining Baku and Red Bull Ring as circuits the model
+  already beats.
 - **No harvesting, carried from V8.** The 4 MJ budget is granted rather than earned, and
   deployment can be placed anywhere on the lap.
