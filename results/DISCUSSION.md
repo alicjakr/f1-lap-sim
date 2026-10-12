@@ -980,3 +980,217 @@ suppressing both modes at once.
   already beats.
 - **No harvesting, carried from V8.** The 4 MJ budget is granted rather than earned, and
   deployment can be placed anywhere on the lap.
+
+
+# V10 — Scoring Against the Right Lap, and Pooling the Aero Estimate
+
+## The solver was pinned to one driver's line and scored against another's time
+
+V9 recorded this as a minor open item, guessing it affected three circuits. Measured
+properly it was **12 of the 21 rounds**. The geometry came from Hamilton's lap because the
+project started from his 2018 Singapore pole — the lap that beat Mercedes' own simulator —
+but the benchmark is the outright pole time, and he was not on pole at over half the season.
+
+Scoring against Hamilton's own lap instead was tried and rejected. It moves the 21-circuit
+mean only +5.5% → +5.2%, leaves 10 circuits untouched, and makes the stdev slightly *worse*
+(4.97 → 5.13). It also only half-fixes the problem: integrating `ds/v` over the exported
+speed traces shows that for Monza, Suzuka, Spa, Yas Marina, Sochi and COTA the geometry is
+not even Hamilton's fastest lap, sitting 0.9–2.2 s off it while agreeing to ~0.05 s
+elsewhere. The benchmark was never the thing that was wrong. **The geometry was.**
+
+So nine circuits were re-exported from the pole-sitter's own lap. Three were not:
+
+| circuit | why not |
+|---|---|
+| Spa | the pole lap has a 33.4 m endpoint gap — a position-telemetry dropout three times worse than anything previously accepted — against a benchmark correction worth 0.052 s |
+| Monaco, Baku | their boundaries come from OpenStreetMap, Overpass was unreachable, and boundary offsets are measured from a *specific* driven line, so reusing the old ones against new geometry would have corrupted the corridor |
+
+The result is **+5.5% → +5.4%**, stdev unchanged. Six circuits improved, three got worse.
+This is a correctness fix, not an accuracy win, and it is worth being clear about that: what
+changed is that nine circuits now compare a driver's line against that same driver's time.
+
+Monza needed a judgment call. Räikkönen's pole lap carries a 6.9 m endpoint gap against
+0.3 m on his lap 16, which is 0.34 s slower — the same trade the original Monza export made
+when it hand-picked `--lap-number 2`. Choosing on telemetry quality *before* looking at the
+result gave +7.9%, still worse than the Hamilton lap's +6.83%. Räikkönen's line is simply
+harder for the solver than Hamilton's was. It stays, because the comparison is now honest.
+
+## FastF1 matches circuit names fuzzily, and silently
+
+Two of the twelve could not be re-exported at all, because `export_track.py` derived its
+output slug from the same string it passed to FastF1, and FastF1's matching is loose enough
+to be dangerous:
+
+| string | resolves to |
+|---|---|
+| `spa` | **Spanish** Grand Prix |
+| `Red Bull Ring` | **British** Grand Prix |
+| `catalunya` | **Italian** Grand Prix |
+
+No string both resolved correctly and lowercased to the slug we use, so `--slug` now
+overrides the filename prefix. The failure mode is the dangerous kind: it does not error, it
+hands back a different circuit's telemetry. It was caught only because a pole time in a
+throwaway analysis looked wrong. `derive_downforce.py` and `validate_pole_times.py` were
+already safe, because both resolve through `TRACKS[slug]` rather than the raw string.
+
+## Pooling the aero estimate across the field
+
+`c_l` is a property of the car at a circuit, not of any one lap, so there was never a reason
+to estimate it from a single one — and V9 had measured two laps of the same car moving the
+estimate by 16%. The estimator now pools apex samples across every lap within 107% of the
+session best (F1's own cutoff for a representative qualifying lap; a cruising lap still
+produces "quasi-steady cornering" points, just below the limit).
+
+| | mean gap | stdev | `c_l` cross-circuit sd |
+|---|---|---|---|
+| single reference lap | +5.52% | 4.97 | 0.00177 |
+| pooled across the field | +6.67% | **4.20** | **0.00101** |
+
+The spread fell 15% on lap time and 43% on `c_l` itself, and it pulled in exactly the right
+outliers: Baku and Red Bull Ring had the two highest `c_l` values and were the only two
+circuits the model ran *faster* than reality, and both dropped most. Physically that is
+right — `c_l` is a wing-level setup choice and has no business varying 2.3× between circuits.
+
+The mean got worse, which needed an explanation. The obvious one — that pooling across the
+whole field contaminates a top-car estimate with midfield cars carrying less downforce — was
+**tested and refuted**. Correlating each team's best lap against its implied `c_l` gives
++0.008, +0.118, −0.056 and −0.450 across four circuits: mean −0.095, inconsistent in sign,
+no systematic relationship. Slower cars do not give lower `c_l`.
+
+The real explanation turned out to be upstream of all of this, and is the subject of V11.
+
+
+# V11 — The Derivatives Were Wrong All Along
+
+## A median of 7.1 g
+
+The aero derivation inverts the friction ellipse's lateral term. A tyre's maximum grip is
+proportional to the load pressing it into the road, and for a car that load is weight plus
+downforce:
+
+```
+a_lat_max = mu_lat * (G + c_l*v^2)
+```
+
+so `c_l` follows from an observed lateral acceleration at a known speed. `a_lat` is
+`v^2 * kappa`, and `kappa` comes from differentiating position telemetry twice.
+
+Checking the distribution of those accelerations across all 21 circuits for the first time:
+
+| quantile | lateral g |
+|---|---|
+| median | **7.12** |
+| p75 | 10.23 |
+| p95 | 21.19 |
+| max | **3,412,576** |
+
+A 2018 F1 car peaked around 5–6 g. **64% of the samples were above 6 g and the median sample
+was already impossible**, so `c_l` was not measuring grip at all — it was the median of a
+noise distribution that happened to land in a plausible range. The same check on longitudinal
+acceleration gave 44 g to 878 g.
+
+## The cause: a distance axis that is not uniformly spaced
+
+FastF1's `Distance` channel samples anywhere from **0.022 m to 20.7 m** apart on the same
+lap, with 6.7% of consecutive samples closer than 1 m. Two lines of the estimator assumed
+otherwise:
+
+- `savgol_filter(x, 9, 3)` takes no `x` argument, so it smooths in *sample* space. A
+  nine-sample window covers 0.2 m of track in one place and 180 m in another.
+- `np.gradient(x_s, s_axis)` then divides by the real spacing — and curvature is a *second*
+  derivative, so the error squares.
+
+Resampling onto a uniform 5 m grid before smoothing fixes both: the window becomes a fixed
+length of track and `np.gradient` takes a scalar step. Catalunya's apex accelerations go from
+a median of 7.12 g to **5.01 g**, and its maximum from 3.4 million g to 14 g.
+
+Three things were ruled out before finding it, and are recorded so they are not retried:
+heavier smoothing (a 71-sample, ~510 m window still left 38.6% above 6 g), substituting the
+solver's own fitted spline curvature (helps Monza and Catalunya, not Silverstone), and
+position-based rather than proportional axis alignment (no effect at all, 70.5% → 71.8%).
+
+## Two errors had been cancelling
+
+| | mean gap | stdev | mean `c_l` |
+|---|---|---|---|
+| single lap (V9 end state) | +5.52% | 4.97 | — |
+| pooled (V10) | +6.67% | 4.20 | 0.00708 |
+| pooled + uniform resampling | **+11.4%** | **3.4** | 0.00558 |
+
+Every consistency measure improved — within-circuit `c_l` spread went from 2.8–3.9× to
+1.2–2.4×, and lap-time stdev is down 32% across both estimator fixes — while the mean got
+steadily worse. That is the signature of removing a compensating error. The contaminated
+derivatives inflated `a_lat`, which pushed `c_l` up, which partly offset a second bias that
+is now dominant and exposed.
+
+That second bias is the statistic itself. `c_l = np.median(c_l_samples)` targets the middle
+of the cloud, but the equation above is a **ceiling**: at any instant the car satisfies
+`a_lat <= a_lat_max`, and a driver is not at the exact limit in every corner of every lap. So
+the samples lie *under* a curve and it is the curve that is wanted. Taking the median is
+measuring a mountain range by averaging the altitude of everything including the valleys.
+Pooling made it worse by adding more sub-limit laps; the resampling fix made it worse again
+by removing the artifacts that had been propping it up.
+
+## One constant, finally measured
+
+`mu_lon = 1.55` and `mu_lat = 1.60` have sat hardcoded in `api.rs` since V5 with no
+derivation behind them. Longitudinal acceleration needs no curvature at all — `a_lon =
+v*dv/ds` comes from the speed trace alone — so with the resampling fixed it gives a clean
+measurement, and at low speed, where downforce is negligible, the braking envelope is
+essentially `mu_lon*G`:
+
+| speed band | p99 | p99.9 | max |
+|---|---|---|---|
+| 10–25 m/s | **1.43 g** | 1.69 g | 1.94 g |
+| 25–40 m/s | 2.77 g | 3.31 g | 4.60 g |
+| 40–55 m/s | 4.19 g | 5.22 g | 7.76 g |
+| 55–70 m/s | 5.56 g | 6.61 g | 8.09 g |
+| 70–85 m/s | 5.71 g | 6.77 g | 8.50 g |
+
+The hardcoded 1.55 sits between the p99 and p99.9 of the low-speed envelope, and the rise
+with speed is the downforce term appearing exactly as the model says it should. The constant
+was a reasonable guess and it survives contact with the data.
+
+## Three ways to estimate the envelope, and why each failed
+
+**A high quantile of the samples.** Contaminated: 48% of samples still exceed 6 g after the
+resampling fix, so any quantile above roughly p75 fits residual artifacts rather than physics.
+
+**The slope-to-intercept ratio.** If drivers use some roughly constant fraction `f` of the
+available grip, the observed median is `f*mu*G + f*mu*c_l*v^2`, and dividing slope by
+intercept makes both `f` and `mu` cancel:
+
+```
+slope/intercept = c_l/G
+```
+
+`c_l` from the *shape* of the cloud, with no need to locate the limit at all. Elegant, and it
+failed outright: COTA returned 0.082, Bahrain and Baku returned **negative** values, Red Bull
+Ring returned NaN.
+
+**The same ratio with more leverage.** The reason for that failure is a design flaw in the
+sample filter. `MIN_APEX_SPEED_KMH = 150` restricts the data to `v^2` in [1736, 7200], so the
+intercept — the value at `v^2 = 0` — is a long extrapolation from data that never approaches
+it, and small slope errors swing it wildly. The general lesson: **two additive terms cannot
+be separated by sampling only where one of them dominates.** That filter is right for the old
+estimator, which wanted corners where aero matters, and wrong for a regression that must tell
+`mu*G` apart from `mu*c_l*v^2`. Slow hairpins pin the mechanical term; fast corners pin the
+aero term.
+
+Dropping the floor to 80 km/h stabilised the fits (r² 0.69–0.95, no negatives) — and the
+intercepts came back at **2.0–4.0 g of apparent grip at zero speed**, which is impossible when
+`mu ≈ 1.6` is the ceiling and `f <= 1` can only push it lower. Curvature was checked as the
+explanation and cleared: the telemetry-derived values are only 1.03–1.26× the solver's
+split-half-validated spline fit, nowhere near the ~2× required.
+
+## Where that leaves it
+
+The inputs are fixed and the statistic is not. The fixed-line model now reads **+11.4%
+(stdev 3.4)** — less accurate than V9's +5.5% and considerably more honest, because the
+earlier figure rested on `c_l` values derived from noise.
+
+The leading suspect for the bad intercept is the `|dv/ds|` bottom-quartile "quasi-steady
+cornering" filter. In a slow hairpin the car is almost never at constant speed — it is
+braking into the apex and accelerating out — so the few low-speed points that survive that
+filter are atypical, and they are the ones anchoring the intercept. That is testable against
+the full population of low-speed corner points, and it is the next thing to try.
