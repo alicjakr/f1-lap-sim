@@ -58,6 +58,14 @@ MIN_APEX_SPEED_KMH = 150.0
 MIN_CURVATURE = 0.008
 DVDS_PERCENTILE = 25  # bottom 25% of |dv/ds| = "quasi-steady-state" cornering
 SMOOTH_WINDOW = 9
+# FastF1's Distance channel is not uniformly spaced: consecutive samples on one lap sit
+# anywhere from 0.02 m to 20 m apart. That breaks both halves of the derivative chain --
+# savgol_filter takes no x argument, so a 9-sample window covers 0.2 m of track in one place
+# and 180 m in another, and np.gradient then divides by the real spacing, which a second
+# derivative squares. The symptom was apex lateral accelerations with a *median* of 7.1 g and
+# a maximum of 3.4 million g (see results/DISCUSSION.md). Resampling onto a uniform grid
+# first makes the smoothing window a fixed length of track and the derivatives well-posed.
+RESAMPLE_DS_M = 5.0
 MIN_SAMPLES_WARN = 10  # below this, c_l rests on too few apexes to be trustworthy
 
 # Pooling across the field multiplies the sample count, but only laps where the driver was
@@ -85,21 +93,28 @@ def c_l_samples_from_lap(s_axis, x, y, v):
     point produced less lateral acceleration than mechanical grip alone allows -- the driver
     was not at the limit there, so it says nothing about downforce and is dropped rather
     than dragging the estimate down."""
-    # np.gradient divides by the spacing, so a repeated Distance sample (which FastF1's
-    # telemetry does contain on some laps) produces a division by zero and poisons the whole
-    # curvature array with inf/nan.
-    if len(s_axis) < SMOOTH_WINDOW + 1 or np.any(np.diff(s_axis) <= 0):
+    # A repeated or out-of-order Distance sample (which FastF1's telemetry does contain on
+    # some laps) would make the resampling below meaningless, so reject the lap outright.
+    if len(s_axis) < 4 or np.any(np.diff(s_axis) <= 0):
         return np.empty(0)
+    grid = np.arange(s_axis[0], s_axis[-1], RESAMPLE_DS_M)
+    if len(grid) < SMOOTH_WINDOW + 1:
+        return np.empty(0)
+    x = np.interp(grid, s_axis, x)
+    y = np.interp(grid, s_axis, y)
+    v = np.interp(grid, s_axis, v)
+
     x_s = savgol_filter(x, SMOOTH_WINDOW, 3, mode="wrap")
     y_s = savgol_filter(y, SMOOTH_WINDOW, 3, mode="wrap")
     v_s = savgol_filter(v, SMOOTH_WINDOW, 3, mode="wrap")
 
-    dx = np.gradient(x_s, s_axis)
-    dy = np.gradient(y_s, s_axis)
-    ddx = np.gradient(dx, s_axis)
-    ddy = np.gradient(dy, s_axis)
+    # Uniform spacing now, so np.gradient takes a scalar step.
+    dx = np.gradient(x_s, RESAMPLE_DS_M)
+    dy = np.gradient(y_s, RESAMPLE_DS_M)
+    ddx = np.gradient(dx, RESAMPLE_DS_M)
+    ddy = np.gradient(dy, RESAMPLE_DS_M)
     kappa = (dx * ddy - dy * ddx) / np.clip(dx**2 + dy**2, 1e-9, None) ** 1.5
-    dvds = np.gradient(v_s, s_axis)
+    dvds = np.gradient(v_s, RESAMPLE_DS_M)
 
     mask = (
         (np.abs(dvds) <= np.percentile(np.abs(dvds), DVDS_PERCENTILE))
@@ -119,7 +134,10 @@ if not (geo["Distance"].values == ref["Distance"].values).all():
 
 s = geo["Distance"].values
 v = ref["Speed"].values / 3.6
-v_s = savgol_filter(v, SMOOTH_WINDOW, 3, mode="wrap")
+# Resampled for the same reason as above: v_max below is a percentile over these samples, and
+# on the raw axis that weights by sample density rather than by distance travelled.
+_grid = np.arange(s[0], s[-1], RESAMPLE_DS_M)
+v_s = savgol_filter(np.interp(_grid, s, v), SMOOTH_WINDOW, 3, mode="wrap")
 
 if args.reference_lap_only:
     c_l_samples = c_l_samples_from_lap(s, geo["X"].values, geo["Y"].values, v)
