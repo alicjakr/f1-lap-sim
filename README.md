@@ -8,14 +8,14 @@ boundaries.
 ![The web UI solving Interlagos](results/web_ui_interlagos.png)
 
 Validated against every race of the 2018 season: pinned to the line a driver actually drove,
-the solver lands **+5.5% off real qualifying pole times** across all 21 circuits.
+the solver lands **+11.4% off real qualifying pole times** across all 21 circuits.
 
 ## Two modes, and why the difference matters
 
 | mode | solves for | vs. real 2018 poles |
 |---|---|---|
-| `optimal` | the speed profile, pinned to the driven lap | **+5.5%** — the validated number |
-| `racingline` | the speed profile *and* the line, within the track width | **−10.0%** — an upper bound |
+| `optimal` | the speed profile, pinned to the driven lap | **+11.4%** — the validated number |
+| `racingline` | the speed profile *and* the line, within the track width | **−4.1%** — an upper bound |
 
 `racingline` is the more complete model: it contains the fixed-line case exactly (a zero
 lateral offset), so it can never solve slower, and that identity is used as a built-in
@@ -201,10 +201,16 @@ multi-word circuits must have been passed as a single token to produce slugs lik
 
 ## Accuracy and limitations
 
-The fixed-line result is +5.5% against real poles, and the honest reading is that most of
-what remains is one coefficient. `c_l` is estimated from a median over 10–25 apex samples
-and alone explains about half the cross-circuit variance in the gap; the worst circuit,
-Sochi, sits at +17.6%. Fixing that estimator is the next real piece of work.
+The fixed-line result is +11.4% against real poles, and the honest reading is that most of
+what remains is one coefficient. `c_l` is estimated as the **median** of pooled apex samples,
+but the equation it inverts describes a *limit* the car is rarely exactly at, so the median
+systematically understates grip and the car comes out slow. The worst circuit, Sochi, sits at
++17.6%. Fixing that estimator is the next real piece of work.
+
+This number got worse, not better, as the model improved. An earlier +5.5% rested on `c_l`
+values derived from telemetry derivatives that were simply wrong — apex accelerations with a
+median of 7.1 g — and that error had been masking this one. V11 in `DISCUSSION.md` has the
+whole story.
 
 Not modelled:
 
@@ -219,9 +225,9 @@ Not modelled:
   qualifying lap, less so for anything else.
 - **Four circuits have no measured track width** (Baku, Monaco, Paul Ricard, Singapore), so
   their racing lines are the least trustworthy here.
-- **Everything rests on one lap per circuit**, and it isn't quite the lap being scored
-  against: geometry comes from Hamilton's lap, while the benchmark is the fastest lap by any
-  driver.
+- **The geometry is one lap per circuit** — the pole-sitter's on 9 circuits, Hamilton's on
+  the rest, where re-exporting was blocked by telemetry dropouts or missing boundary data.
+  The aero coefficients are pooled across the whole field's push laps rather than one lap.
 
 **[`results/DISCUSSION.md`](results/DISCUSSION.md) is the real story** — the full engineering
 narrative from V1 to V9: what was tried, what was rejected and why, the formulation errors
