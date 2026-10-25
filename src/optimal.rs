@@ -525,15 +525,19 @@ pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), Stri
 // odd-even null space the solver exploits for a spurious lap-time gain. The staggered grid
 // removes that mode structurally, so no regularization is needed.
 //
-// Variables, 5n: [x, u, n, xi, kappa] at offsets 0, n, 2n, 3n, 4n.
-// Constraints, 6n: [x-defect, n-defect, xi-defect, ellipse, power, steering-rate] at row
-// offsets 0, n, 2n, 3n, 4n, 5n. The steering-rate rows bound (kappa[i+1]-kappa[i])^2 * x[i]
-// -- i.e. |dkappa/ds|*v, the rate the car re-aims itself in *time* (see
-// api::steering_rate_limit). Without it a point mass changes direction instantly and the
-// free line exploits flicks no car could drive. Power is unchanged from MinTimeProblem; the ellipse is the same functional form
-// with kappa in place of the fixed curvature; the x-defect carries the same h as dt/ds does,
-// so speed changes are integrated over the path actually driven rather than over the
-// reference line. n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly.
+// Variables, 6n: [x, u, n, xi, kappa, p_k] at offsets 0, n, 2n, 3n, 4n, 5n, where p_k is the
+// MGU-K deployment control (W/kg).
+// Constraints, 6n+1: [x-defect, n-defect, xi-defect, ellipse, power, steering-rate] at row
+// offsets 0, n, 2n, 3n, 4n, 5n, plus the lap's ERS energy budget as a single row at 6n -- the
+// only constraint here that is not pointwise.
+//
+// The steering-rate rows bound (kappa[i+1]-kappa[i])^2 * x[i] -- i.e. |dkappa/ds|*v, the rate
+// the car re-aims itself in *time* (see api::steering_rate_limit). Without it a point mass
+// changes direction instantly and the free line exploits flicks no car could drive. Power is
+// unchanged from MinTimeProblem; the ellipse is the same functional form with kappa in place
+// of the fixed curvature; the x-defect carries the same h as dt/ds does, so speed changes are
+// integrated over the path actually driven rather than over the reference line.
+// n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly.
 //
 // Hessian terms beyond MinTimeProblem's (K=kappa_i, L=mu_lat, g=g_eff):
 //   d2E/dK2                      = 2*x^2/(L^2*g^2)
