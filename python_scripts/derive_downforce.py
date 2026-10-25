@@ -67,6 +67,8 @@ SMOOTH_WINDOW = 9
 # first makes the smoothing window a fixed length of track and the derivatives well-posed.
 RESAMPLE_DS_M = 5.0
 MIN_SAMPLES_WARN = 10  # below this, c_l rests on too few apexes to be trustworthy
+TOP_SPEED_FRACTION = 0.85  # "near top speed" for the drag fit, as a fraction of the lap's max
+MIN_CD_SAMPLES = 10
 
 # Pooling across the field multiplies the sample count, but only laps where the driver was
 # actually pushing carry information about the limit: the estimator inverts
@@ -89,10 +91,14 @@ def c_l_samples_from_lap(s_axis, x, y, v):
     """Implied c_l at every quasi-steady-state apex of one lap.
 
     Inverts the friction ellipse's lateral term, a_lat = mu_lat*(G + c_l*v^2), at points
-    where the car is cornering at roughly constant speed. A negative implied c_l means the
-    point produced less lateral acceleration than mechanical grip alone allows -- the driver
-    was not at the limit there, so it says nothing about downforce and is dropped rather
-    than dragging the estimate down."""
+    where the car is cornering at roughly constant speed.
+
+    Every sample passing the physical mask below is kept, including the ones implying a
+    negative c_l. Those are points where the car pulled less than mu_lat*G, and it is
+    tempting to drop them as "the driver was not at the limit there" -- but that discards
+    the low tail of the distribution whose median is then taken, which inflates the result.
+    The mask conditions on measurable things (curvature, speed, steadiness); dropping a
+    sample because of the sign of the number computed *from* it conditions on the answer."""
     # A repeated or out-of-order Distance sample (which FastF1's telemetry does contain on
     # some laps) would make the resampling below meaningless, so reject the lap outright.
     if len(s_axis) < 4 or np.any(np.diff(s_axis) <= 0):
@@ -123,8 +129,7 @@ def c_l_samples_from_lap(s_axis, x, y, v):
     )
     vi = v_s[mask]
     a_lat = vi**2 * np.abs(kappa[mask])
-    implied = (a_lat / MU_LAT - G) / np.clip(vi**2, 1e-9, None)
-    return implied[implied > 0]
+    return (a_lat / MU_LAT - G) / np.clip(vi**2, 1e-9, None)
 
 
 geo = pd.read_csv(f"data/{slug}_track_geometry.csv")
@@ -186,12 +191,50 @@ if len(c_l_samples) < MIN_SAMPLES_WARN:
         f"sample(s); treat this track's aero (and so its lap time) as weakly determined."
     )
 
+# c_d from the full-throttle equation of motion rather than from a top speed.
+#
+# The old form, c_d = P_ENGINE / v_max**3, is the drag that would make v_max the terminal
+# velocity -- where power exactly balances drag and the car stops accelerating. Measured,
+# no circuit on the 2018 calendar gets there: the longest stretch of genuinely constant
+# high speed is 170 m at Baku and 20 m at Monaco, so v_max always understates terminal and
+# c_d, which goes as 1/v^3, came out high everywhere. Monaco was the visible symptom at
+# 0.00217 against 0.0013-0.0017 elsewhere.
+#
+# At full throttle the car obeys  dv/dt = P/v - c_d*v^2, so every high-speed point gives a
+# reading of c_d = (P/v - v*dv/ds)/v^2 with no terminal-velocity assumption at all. Taken
+# over the points where the engine is the binding limit -- near top speed, still
+# accelerating, DRS open where it was open.
 v_max = np.percentile(v_s, 99.5)
-c_d_drs = P_ENGINE / v_max**3
+dvds_ref = np.gradient(v_s, RESAMPLE_DS_M)
+try:
+    _dz = pd.read_csv(f"data/{slug}_drs_zones.csv")
+    drs_open = np.interp(_grid, _dz.iloc[:, 0].values,
+                         _dz.iloc[:, 1].values.astype(float)) > 0.5
+except Exception:
+    drs_open = np.zeros(len(_grid), dtype=bool)
+
+full_throttle = (v_s >= TOP_SPEED_FRACTION * v_s.max()) & (dvds_ref > 0)
+drs_points = full_throttle & drs_open
+if drs_points.sum() >= MIN_CD_SAMPLES:
+    # DRS was open at these points, so the power/drag balance yields c_d_drs directly.
+    mask_cd, wing_open = drs_points, True
+elif full_throttle.sum() >= MIN_CD_SAMPLES:
+    # No DRS export for this circuit, or its zones never overlap the top-speed run. These
+    # points are DRS-closed, so the same balance yields c_d itself -- converting as though
+    # they were DRS-open would inflate it by 1/DRS_DRAG_REDUCTION.
+    mask_cd, wing_open = full_throttle, False
+else:
+    raise ValueError(f"{slug}: only {full_throttle.sum()} full-throttle sample(s); too few to derive c_d")
+
+_cd_samples = (P_ENGINE / v_s[mask_cd] - v_s[mask_cd] * dvds_ref[mask_cd]) / v_s[mask_cd] ** 2
+_cd_samples = _cd_samples[_cd_samples > 0]
+_cd_measured = float(np.median(_cd_samples))
+c_d_drs = _cd_measured if wing_open else _cd_measured * DRS_DRAG_REDUCTION
 c_d = c_d_drs / DRS_DRAG_REDUCTION
 
 out_path = f"data/{slug}_aero_params.csv"
 pd.DataFrame({"c_l": [c_l], "c_d": [c_d]}).to_csv(out_path, index=False)
 iqr = np.percentile(c_l_samples, 75) / max(np.percentile(c_l_samples, 25), 1e-9)
 print(f"{slug}: n_laps={n_laps} n_samples={len(c_l_samples)} c_l={c_l:.5f} "
-      f"(p75/p25 spread {iqr:.1f}x) c_d={c_d:.5f} v_max={v_max*3.6:.1f} km/h -> {out_path}")
+      f"(p75/p25 spread {iqr:.1f}x) c_d={c_d:.5f} (from {len(_cd_samples)} full-throttle "
+      f"points, DRS {'open' if wing_open else 'closed'}) v_max={v_max*3.6:.1f} km/h -> {out_path}")
