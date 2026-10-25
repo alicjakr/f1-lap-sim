@@ -8,14 +8,14 @@ boundaries.
 ![The web UI solving Interlagos](results/web_ui_interlagos.png)
 
 Validated against every race of the 2018 season: pinned to the line a driver actually drove,
-the solver lands **+11.4% off real qualifying pole times** across all 21 circuits.
+the solver lands **+11.0% off real qualifying pole times** across all 21 circuits.
 
 ## Two modes, and why the difference matters
 
 | mode | solves for | vs. real 2018 poles |
 |---|---|---|
-| `optimal` | the speed profile, pinned to the driven lap | **+11.4%** — the validated number |
-| `racingline` | the speed profile *and* the line, within the track width | **−4.1%** — an upper bound |
+| `optimal` | the speed profile, pinned to the driven lap | **+11.0%** — the validated number |
+| `racingline` | the speed profile *and* the line, within the track width | **−4.6%** — an upper bound |
 
 `racingline` is the more complete model: it contains the fixed-line case exactly (a zero
 lateral offset), so it can never solve slower, and that identity is used as a built-in
@@ -201,11 +201,11 @@ multi-word circuits must have been passed as a single token to produce slugs lik
 
 ## Accuracy and limitations
 
-The fixed-line result is +11.4% against real poles, and the honest reading is that most of
+The fixed-line result is +11.0% against real poles, and the honest reading is that most of
 what remains is one coefficient. `c_l` is estimated as the **median** of pooled apex samples,
 but the equation it inverts describes a *limit* the car is rarely exactly at, so the median
 systematically understates grip and the car comes out slow. The worst circuit, Sochi, sits at
-+17.6%. Fixing that estimator is the next real piece of work.
++17.2%. Fixing that estimator is the next real piece of work.
 
 This number got worse, not better, as the model improved. An earlier +5.5% rested on `c_l`
 values derived from telemetry derivatives that were simply wrong — apex accelerations with a
@@ -219,6 +219,10 @@ Not modelled:
   couldn't.
 - **A sub-grid artifact** — give the car 1 cm of lateral freedom and it still finds 0.3–1.1 s
   by weaving, because the grip limit is enforced only at sample points.
+- **An arbitrary constant shapes the free racing line.** The heading angle is capped at 0.3 rad
+  as a numerical rail for a small-angle approximation, but the solver sits on that cap, and
+  varying it across its plausible range moves lap time by several seconds per circuit. Affects
+  `racingline` only — the fixed line holds the heading at zero. See V12.
 - **No harvesting** — the MGU-K's 4 MJ is granted rather than earned under braking, and can
   be spent anywhere on the lap.
 - **No tyre wear, fuel burn, track evolution, elevation or banking.** Reasonable for a single
@@ -230,7 +234,7 @@ Not modelled:
   The aero coefficients are pooled across the whole field's push laps rather than one lap.
 
 **[`results/DISCUSSION.md`](results/DISCUSSION.md) is the real story** — the full engineering
-narrative from V1 to V9: what was tried, what was rejected and why, the formulation errors
+narrative from V1 to V12: what was tried, what was rejected and why, the formulation errors
 that were found and fixed, and how the accuracy actually evolved. Including the conclusions
 that turned out to be wrong.
 
