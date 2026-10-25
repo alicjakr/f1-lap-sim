@@ -1194,3 +1194,129 @@ cornering" filter. In a slow hairpin the car is almost never at constant speed �
 braking into the apex and accelerating out — so the few low-speed points that survive that
 filter are atypical, and they are the ones anchoring the intercept. That is testable against
 the full population of low-speed corner points, and it is the next thing to try.
+
+
+# V12 — Drag Without Terminal Velocity, and a Safety Rail That Isn't One
+
+## The car never reaches the speed the drag estimate assumes
+
+`c_d` came from `P_ENGINE / v_max**3`: the drag that would make the lap's top speed a
+*terminal* velocity, where power exactly balances drag and the car stops accelerating. The
+review flagged Monaco as an outlier at 0.00217 against 0.0013–0.0017 everywhere else, and
+suggested requiring `|dv/ds| ≈ 0` at the chosen speed.
+
+Measuring first showed the problem is not Monaco's. **No circuit on the 2018 calendar reaches
+terminal velocity.** The longest stretch of genuinely constant high speed is 170 m at Baku and
+20 m at Monaco; everywhere else is shorter. Since `c_d` goes as `1/v^3`, and `v_max` always
+understates terminal, drag was biased high on all 21 circuits. Monaco was merely the circuit
+where the shortfall was large enough to look wrong.
+
+The suggested `|dv/ds| ≈ 0` test also does nothing, for a reason worth recording: **`dv/ds` is
+zero at the top of every speed hump**, which is where the driver lifts to brake. An
+instantaneous zero cannot be told from a terminal plateau. Requiring the zero to be *sustained*
+is the right form of the test, and that is what showed no circuit qualifies.
+
+So the assumption was dropped instead. At full throttle the car obeys
+
+```
+dv/dt = P/v - c_d*v^2
+```
+
+which rearranges to give a reading of `c_d` at **every** high-speed point, with no terminal
+velocity anywhere in it:
+
+```
+c_d = (P/v - v*dv/ds) / v^2
+```
+
+| | before | after |
+|---|---|---|
+| Monaco | 0.00217 (1.40× the median) | **0.00174** (1.15×) |
+| cross-circuit stdev | 0.00017 | **0.00010** |
+| evidence per circuit | one percentile of one lap | 40–398 points |
+
+Within-circuit spread is 1.1–1.2×, so drag is now well determined — unlike `c_l`, whose spread
+is 1.2–4.5×. Monaco sitting slightly above the median is correct rather than suspicious:
+maximum downforce costs maximum drag.
+
+## Three circuits had been running with DRS switched off
+
+Deriving drag circuit by circuit turned up something larger. Catalunya, Melbourne and
+Singapore had no `drs_zones.csv` at all, so **the solver ran them with DRS closed for the whole
+lap** — a feature missing from every straight rather than a coefficient slightly off. They were
+left over from before `export_track.py` wrote DRS zones, and they are also the three circuits
+that never needed re-exporting in V10, since Hamilton took pole at all three.
+
+Re-exporting from the same pole laps produced byte-identical geometry with DRS zones added;
+all 21 circuits now have them, and the other 18 moved by 0.00 pp. Their drag rose as a result,
+because their full-throttle points had been mislabelled as DRS-closed when the real car had it
+open, so the three get slightly slower. Correctness improved and accuracy did not, which is the
+honest way to describe it.
+
+## A bias that was real and cost nothing
+
+The review also flagged `implied[implied > 0]`, which discarded apex samples whose implied
+`c_l` came out negative. That is conditioning on the computed result rather than on anything
+measurable, and it truncates the low tail of a distribution whose median is then taken.
+
+The reasoning is right and the effect is nil: removing it added **1–2 samples per circuit** and
+moved `c_l` by at most 0.000032. The physical mask already requires 150 km/h and
+`|kappa| >= 0.008`, which admits nothing below 1.42 g, while the sign filter only cut below
+`mu_lat*G` = 1.60 g. It was only ever biting inside that narrow band. Worth fixing on
+principle; worth nothing in practice.
+
+Net across all of the above: **+11.39% → +11.04%**, stdev 3.40 → 3.44.
+
+## The heading angle sits on its bound, and the bound is worth seconds
+
+The last review item concerned a missing `1/cos(xi)` factor in the path length. The
+racing-line formulation uses the small-angle approximation `tan(xi) = xi`, `cos(xi) = 1`, which
+`optimal.rs` documents openly. The review's instruction was to measure before changing
+anything: if `|xi|` stays under about 0.05 the cost is under 0.15% and it can be left alone.
+
+Reconstructing `xi` from the solved laps through the n-defect relation gives the opposite
+answer, and not narrowly:
+
+| | threshold to leave it | measured |
+|---|---|---|
+| max `\|xi\|` | under ~0.05 | **0.3000 on all 21 circuits** |
+| lap-time cost | under 0.15% | **1.03% mean, 1.58% worst** |
+
+0.3000 is not a coincidence. It is `xi_bound`, which `optimal.rs:1054` describes as a
+"numerical safety rail on the small-angle approximation, not a physical limit". **The solver
+sits on that rail** — on 2.8% of the lap on average and 7.8% at Melbourne.
+
+That raised an obvious question the review had not asked, so the constant was swept:
+
+| `xi_bound` | ≈deg | Melbourne | Yas Marina | Monza | Monaco | mean vs 0.3 |
+|---|---|---|---|---|---|---|
+| 0.10 | 6° | 77.918 | 102.332 | 79.545 | 72.853 | **+6.47 s** |
+| 0.20 | 11° | 74.730 | 98.084 | 75.457 | 69.045 | +2.64 s |
+| 0.30 | 17° | 71.518 | 93.644 | 73.584 | 68.025 | — |
+| 0.45 | 26° | 68.167 | 90.583 | 73.485 | 67.426 | **−1.78 s** |
+| 0.60 | 34° | 68.079 | 90.349 | 73.485 | 67.272 | −1.90 s |
+
+**A safety rail that moves lap time by 8.4 seconds across its plausible range is not a safety
+rail.** It is an undeclared physical constraint, and it is currently the most influential
+arbitrary constant in the racing-line model — far more so than the 1% the review item was
+about.
+
+The sweep says three further things. The bound genuinely binds at 0.3, since loosening it to
+0.45 buys Melbourne 3.35 s; a slack rail would buy nothing. It stops binding near 0.45–0.6,
+where 0.45 → 0.60 is worth 0.12 s mean and Monza is identical to the millisecond — so the
+solver's unconstrained preference is around 26°, far outside any range where `tan(xi) = xi`
+and `cos(xi) = 1` can be defended (at 26° those are wrong by 8% and 10%). And the effect is
+very uneven: Melbourne moves 9.8 s across the sweep while Monza is flat above 0.3, so the
+constant distorts comparisons *between* circuits as well as each circuit's own line.
+
+One thing it is not: the sub-grid weave. A saturated heading angle looked like a plausible
+mechanism for it, but the heading holds one sign for a median of 40 m — eight grid cells — which
+is sustained cornering, not grid-frequency alternation.
+
+All of this touches only the racing line. The fixed-line solver pins `xi = 0`, so the validated
++11.0% is untouched and the implementation would make the racing line about 1% *slower*.
+
+That reframes the item. The missing `1/cos(xi)` is not an independent 1% correction to be
+weighed on its own merits: it is one half of an approximation whose other half is being held
+together by a constant worth seconds. The argument for doing the exact trigonometry is not the
+1% — it is that doing it would let an arbitrary constant be **deleted** rather than tuned.
