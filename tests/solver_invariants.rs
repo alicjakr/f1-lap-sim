@@ -167,3 +167,112 @@ fn returned_profile_satisfies_the_constraints() {
         assert!(x > 0.0 && (G + p.c_l * x).is_finite(), "point {i}: non-physical speed {x}");
     }
 }
+
+/// The steering-rate row bounds |dkappa/ds|*v, so tightening it can only remove paths.
+/// Nothing above reaches this constraint: a constant-radius track has dkappa/ds = 0 by
+/// construction, and the fixed-line solver has no such row at all (its path is given).
+#[test]
+fn tighter_steering_rate_is_never_faster() {
+    let p = car();
+    let curvature = common::two_arc_curvature(45.0, 80.0);
+    let n_full = curvature.len();
+    let bound_s: Vec<f64> = (0..n_full).map(|i| i as f64).collect();
+    let left = vec![3.0; n_full];
+    let right = vec![-3.0; n_full];
+
+    let solve = |omega: Option<f64>| {
+        let inp = SolveInputs { omega_max: omega, ..inputs(&curvature, &p) };
+        solve_racing_line(&inp, &bound_s, &left, &right).expect("solve failed").2
+    };
+
+    // These values are chosen to BIND. A cap of 0.05 or even 0.01 leaves this track's lap
+    // time bit-identical to no cap at all, so a test using them would pass just as happily
+    // with the constraint deleted. The strict inequalities below are the point of the test.
+    let free = solve(None);
+    let loose = solve(Some(0.004));
+    let tight = solve(Some(0.003));
+
+    assert!(
+        loose > free + 0.05,
+        "the rate cap did not bind: 0.004 gave {loose:.4}s against {free:.4}s uncapped"
+    );
+    assert!(
+        tight > loose + 0.05,
+        "tightening the cap did nothing: 0.003 gave {tight:.4}s against 0.004's {loose:.4}s"
+    );
+}
+
+/// Opening DRS lowers drag, which cannot make the lap slower. This is the only test that
+/// reaches the c_d -> c_d_drs switching path and resample_drs.
+#[test]
+fn drs_never_costs_time() {
+    let p = car();
+    let curvature = common::corner_and_straight(60.0, 600.0);
+    let n_full = curvature.len();
+
+    // DRS open over the second half of the straight, where the car is quickest.
+    let drs_s: Vec<f64> = (0..n_full).map(|i| i as f64).collect();
+    let drs_open: Vec<bool> = (0..n_full).map(|i| curvature[i] == 0.0 && i > n_full * 3 / 4).collect();
+    assert!(drs_open.iter().any(|&o| o), "fixture opened DRS nowhere");
+
+    let closed = solve_min_time(&inputs(&curvature, &p)).expect("solve failed").1;
+    let open = solve_min_time(&SolveInputs {
+        drs_s: &drs_s,
+        drs_open: &drs_open,
+        ..inputs(&curvature, &p)
+    })
+    .expect("solve failed")
+    .1;
+
+    // Strict, so that a c_d -> c_d_drs switch that silently never fires fails here rather
+    // than passing on an inequality it satisfies by doing nothing.
+    assert!(
+        open < closed - 1e-3,
+        "opening DRS changed nothing: {open:.4}s against {closed:.4}s closed"
+    );
+}
+
+/// The racing-line solution's own constraints, checked on what it returned. The fixed-line
+/// feasibility test above cannot reach these: the corridor bounds, the heading bound and the
+/// path curvature only exist in this formulation.
+#[test]
+fn racing_line_solution_stays_inside_its_bounds() {
+    // Mirrors xi_bound in optimal.rs::solve_racing_line. If that constant moves, this should
+    // fail and be updated deliberately, load bearing rather than a formality.
+    const XI_BOUND: f64 = 0.3;
+
+    let p = car();
+    let curvature = common::two_arc_curvature(45.0, 80.0);
+    let n_full = curvature.len();
+    let bound_s: Vec<f64> = (0..n_full).map(|i| i as f64).collect();
+    let (half_left, half_right) = (3.0_f64, -3.0_f64);
+    let left = vec![half_left; n_full];
+    let right = vec![half_right; n_full];
+
+    let inp = inputs(&curvature, &p);
+    let (velocity, n_profile, _, ds) =
+        solve_racing_line(&inp, &bound_s, &left, &right).expect("solve failed");
+
+    let (kappa_ref, _) = f1_lap_sim::optimal::coarsen_periodic(&curvature, 1.0, SPACING_M);
+    assert_eq!(kappa_ref.len(), n_profile.len());
+
+    let xi = common::heading_from_offsets(&n_profile, &kappa_ref, ds);
+    let kappa = common::curvature_from_heading(&xi, &n_profile, &kappa_ref, ds);
+
+    for i in 0..n_profile.len() {
+        assert!(
+            n_profile[i] >= half_right - 1e-6 && n_profile[i] <= half_left + 1e-6,
+            "point {i}: offset {:.6} m is outside the corridor", n_profile[i]
+        );
+        assert!(
+            xi[i].abs() <= XI_BOUND + 1e-6,
+            "point {i}: heading {:.6} rad exceeds the {XI_BOUND} rad bound", xi[i]
+        );
+        assert!(velocity[i] > 0.0, "point {i}: non-physical speed {:.6}", velocity[i]);
+
+        // Necessary condition from the ellipse: the lateral term alone cannot exceed it.
+        let x = velocity[i] * velocity[i];
+        let lat = (x * kappa[i]).abs() / (p.mu_lat * (G + p.c_l * x));
+        assert!(lat <= 1.0 + 1e-4, "point {i}: lateral load at {lat:.6} of the ellipse");
+    }
+}

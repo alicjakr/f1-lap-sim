@@ -67,3 +67,55 @@ pub fn ellipse_usage(x: f64, u: f64, curvature: f64, c_d: f64, p: &CarParams) ->
     let lon = (u + c_d * x) / (p.mu_lon * g_eff);
     lat * lat + lon * lon
 }
+
+/// Curvature of a track made of two constant-radius arcs.
+///
+/// The curvature step is the point: a single-radius track has `dkappa/ds = 0` everywhere, so
+/// it can never exercise the steering-rate constraint no matter how tight the bound.
+pub fn two_arc_curvature(radius_a: f64, radius_b: f64) -> Vec<f64> {
+    let n_a = (std::f64::consts::PI * radius_a).round() as usize;
+    let n_b = (std::f64::consts::PI * radius_b).round() as usize;
+    let mut k = vec![1.0 / radius_a; n_a];
+    k.extend(vec![1.0 / radius_b; n_b]);
+    k
+}
+
+/// A corner joined to a straight, so that drag (and therefore DRS) actually matters.
+pub fn corner_and_straight(radius_m: f64, straight_m: f64) -> Vec<f64> {
+    let n_corner = (std::f64::consts::PI * radius_m).round() as usize;
+    let mut k = vec![1.0 / radius_m; n_corner];
+    k.extend(vec![0.0; straight_m.round() as usize]);
+    k
+}
+
+/// Heading angle on each segment, inverted from the solver's own n-defect:
+///   n[i+1] - n[i] = ds * xi[i] * (h[i] + h[i+1]) / 2
+pub fn heading_from_offsets(n_profile: &[f64], kappa_ref: &[f64], ds: f64) -> Vec<f64> {
+    let n = n_profile.len();
+    let h = |i: usize| 1.0 - n_profile[i] * kappa_ref[i];
+    (0..n)
+        .map(|i| {
+            let j = (i + 1) % n;
+            let h_mid = 0.5 * (h(i) + h(j));
+            (n_profile[j] - n_profile[i]) / (ds * h_mid)
+        })
+        .collect()
+}
+
+/// Path curvature at each node, inverted from the solver's own xi-defect:
+///   xi[i] - xi[i-1] = ds * (kappa[i]*h[i] - kappa_ref[i])
+pub fn curvature_from_heading(
+    xi: &[f64],
+    n_profile: &[f64],
+    kappa_ref: &[f64],
+    ds: f64,
+) -> Vec<f64> {
+    let n = xi.len();
+    (0..n)
+        .map(|i| {
+            let im1 = (i + n - 1) % n;
+            let h = 1.0 - n_profile[i] * kappa_ref[i];
+            ((xi[i] - xi[im1]) / ds + kappa_ref[i]) / h
+        })
+        .collect()
+}
