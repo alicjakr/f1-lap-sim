@@ -75,11 +75,13 @@ pub fn pole_time_2018(track: &str) -> Option<f64> {
 const OSM_LANES_WIDTH: &str = "Track width here comes from OpenStreetMap lane counts (lanes x 3.5 m), \
 not from measurement: this circuit isn't in the TUM racetrack-database. That is the width of the \
 public road, which is not the same as the circuit between the barriers, so the racing line has room \
-the drivers may not have had.";
+the drivers may not have had. Where a way carries no lane count the export falls back to two lanes, \
+which is also 7 m, so the stretches at exactly 7 m may be a guess rather than a count.";
 
 const OSM_FLAT_WIDTH: &str = "Track width here is an assumed flat 7 m, not measured: this circuit \
-isn't in the TUM racetrack-database, and no OpenStreetMap way for it carries a width or lane-count \
-tag. The corridor has no real shape, so the racing line is the least trustworthy of any track here.";
+isn't in the TUM racetrack-database, and almost no OpenStreetMap way for it carries a width or \
+lane-count tag. The corridor has essentially no shape, so the racing line is the least trustworthy \
+of any track here.";
 
 const KNOWN_DATA_ISSUES: &[(&str, &str)] = &[
     ("baku", OSM_LANES_WIDTH),
