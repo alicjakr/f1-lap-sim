@@ -1219,7 +1219,15 @@ pub fn solve_racing_line(
 
     let mut ipopt = Ipopt::new(problem).unwrap();
     ipopt.set_option("hessian_approximation", "exact");
-    ipopt.set_option("mu_strategy", "adaptive");
+    // Monotone, not adaptive. With exact trigonometry the heading box is wide (the old 0.3 rad
+    // cap is gone), and from the infeasible warm start the adaptive rule raises mu to ~6e5,
+    // which drags iterates toward the middle of every box. Ipopt then stalls for hundreds of
+    // iterations (Hessian regularisation ~1e10, objective wandering up to 137 s on Bahrain)
+    // before restoration finds the way out: 685 iterations and 72 s, against 30-40 iterations
+    // before. A small starting mu keeps the iterates near the warm start. The optimum is the
+    // same to 1 ms on all 21 circuits; only the route changes.
+    ipopt.set_option("mu_strategy", "monotone");
+    ipopt.set_option("mu_init", 1e-3);
     ipopt.set_option("tol", 1e-6);
     ipopt.set_option("max_iter", 3000);
     ipopt.set_option("sb", "yes");

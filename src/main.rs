@@ -13,7 +13,7 @@ fn main() {
     // Target collocation-point spacing in meters. 5 m rather than a coarser grid because
     // lap time is still converging above it: at 25 m the solve reads 1-2 s optimistic
     // (widely spaced samples skip curvature peaks), while 5 m is within ~0.1 s of the 1 m
-    // answer and still solves in well under a second.
+    // answer and still solves in seconds (the racing line; the fixed line in well under one).
     let spacing: f64 = env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(5.0);
     let curvature_debug_path = format!("data/{}_curvature_debug.csv", track_slug);
     let simulated_lap_optimal_path = format!("data/{}_simulated_lap_optimal.csv", track_slug);

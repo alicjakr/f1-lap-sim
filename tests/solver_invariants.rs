@@ -67,8 +67,13 @@ fn zero_width_reduces_to_the_fixed_line() {
     let (_, _, racing_time, _) =
         solve_racing_line(&inp, &bound_s, &zero, &zero).expect("racing-line solve failed");
 
+    // Relative, at the solvers' own precision: Ipopt stops at tol = 1e-6, and the two problems
+    // take different barrier routes (the racing line uses a monotone schedule), so they agree
+    // to about 1e-6 relative, not to the last digit. A real formulation discrepancy is orders
+    // of magnitude larger -- the bugs this test found moved lap times by 0.03 s to whole
+    // seconds, i.e. 1e-3 to 1e-1 relative -- so 1e-5 keeps its sensitivity.
     assert!(
-        (racing_time - fixed_time).abs() < 1e-6,
+        (racing_time - fixed_time).abs() / fixed_time < 1e-5,
         "zero-width racing line {racing_time:.9}s != fixed line {fixed_time:.9}s"
     );
 }
