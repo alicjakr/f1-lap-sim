@@ -237,9 +237,11 @@ fn drs_never_costs_time() {
 /// path curvature only exist in this formulation.
 #[test]
 fn racing_line_solution_stays_inside_its_bounds() {
-    // Mirrors xi_bound in optimal.rs::solve_racing_line. If that constant moves, this should
-    // fail and be updated deliberately, load bearing rather than a formality.
-    const XI_BOUND: f64 = 0.3;
+    // Mirrors xi_bound in optimal.rs::solve_racing_line. It is only a domain guard now (tan and
+    // 1/cos are singular at 90 degrees), so beyond staying inside it the solution must stay
+    // well clear of it: a heading on the guard would mean the guard is acting as a physical
+    // limit again, which is exactly what the old 0.3 rad "safety rail" turned out to be.
+    const XI_BOUND: f64 = 1.2;
 
     let p = car();
     let curvature = common::two_arc_curvature(45.0, 80.0);
@@ -265,8 +267,8 @@ fn racing_line_solution_stays_inside_its_bounds() {
             "point {i}: offset {:.6} m is outside the corridor", n_profile[i]
         );
         assert!(
-            xi[i].abs() <= XI_BOUND + 1e-6,
-            "point {i}: heading {:.6} rad exceeds the {XI_BOUND} rad bound", xi[i]
+            xi[i].abs() <= 0.5 * XI_BOUND,
+            "point {i}: heading {:.6} rad is within reach of the {XI_BOUND} rad domain guard", xi[i]
         );
         assert!(velocity[i] > 0.0, "point {i}: non-physical speed {:.6}", velocity[i]);
 

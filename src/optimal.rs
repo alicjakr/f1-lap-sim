@@ -30,6 +30,8 @@
 // (d2P/du2 = d2P/dxdu = 0 -- power is linear in u.) Sparsity: 3 entries per point (x
 // diagonal, u diagonal, x-u cross term).
 
+use std::collections::{BTreeSet, HashMap};
+
 use ipopt::*;
 
 use crate::solver::{backward_pass, corner_speed_limits, forward_pass, top_speed_drs, CarParams};
@@ -506,24 +508,35 @@ pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), Stri
 // Adds lateral offset n(s) (bounded by track width, data/<slug>_track_boundaries.csv),
 // heading xi(s) relative to the track tangent, and path curvature kappa(s) as a free
 // control (replacing MinTimeProblem's fixed curvature array). Heading-based curvilinear
-// formulation (Perantoni & Limebeer). With h(s) = 1 - n(s)*kappa_ref(s) (path-length
-// stretch factor) and the small-angle approximation tan(xi)=xi, cos(xi)=1 (xi is bounded as
-// a validity rail, not a physical limit):
-//   dn/ds = h*xi
-//   dxi/ds = kappa*h - kappa_ref
-//   dt/ds = h/v
-//   dx/ds = 2*u*h        (the car covers h*ds of path per ds of reference line)
+// formulation (Perantoni & Limebeer), exact in xi -- no small-angle approximation. With
+// h(s) = 1 - n(s)*kappa_ref(s) the path stretch from sitting off the reference line, the car
+// drives Q = h/cos(xi) of path per unit of reference-line length ds:
+//   dn/ds = h*tan(xi)          (dn/dpath = sin(xi))
+//   dxi/ds = kappa*Q - kappa_ref
+//   dt/ds = Q/v
+//   dx/ds = 2*u*Q
 //   a_lat = x*kappa
+// Earlier versions used tan(xi) = xi and cos(xi) = 1, which needed xi capped at 0.3 rad to be
+// defensible and then sat on that cap on every circuit: the cap alone moved lap time by
+// several seconds (DISCUSSION.md V12). The remaining bound on xi is only a domain guard --
+// tan and 1/cos blow up at 90 degrees -- and the tests assert the solution never reaches it.
 //
 // Staggered grid: x, u, n, kappa live on the nodes, xi on the segments (xi[i] is the heading
-// over segment i -> i+1):
-//   n-defect[i]  = n[i+1] - n[i] - ds*xi[i]*(h[i] + h[i+1])/2
-//   xi-defect[i] = xi[i] - xi[i-1] - ds*(kappa[i]*h[i] - kappa_ref[i])
-// so xi is fixed by n's first differences and kappa by xi's. With all three on the nodes
-// (plain trapezoidal), an alternating xi/kappa pattern satisfies both defects at any
-// amplitude while letting kappa undercut kappa_ref at speed-limiting nodes -- an exact
-// odd-even null space the solver exploits for a spurious lap-time gain. The staggered grid
-// removes that mode structurally, so no regularization is needed.
+// over segment i -> i+1), and so does Q:  Q_i = h_mid_i / cos(xi_i),  h_mid_i = mean of h at
+// nodes i and i+1.
+//   x-defect[i]  = x[i+1] - x[i] - ds*Q_i*(u[i] + u[i+1])
+//   n-defect[i]  = n[i+1] - n[i] - ds*h_mid_i*tan(xi_i)
+//   xi-defect[i] = xi[i] - xi[i-1] - ds*(kappa[i]*(Q_{i-1} + Q_i)/2 - kappa_ref[i])
+// so xi is fixed by n's first differences and kappa by xi's. (The xi-defect integrates kappa
+// over the path of the dual cell centred on node i, whose length is ds*(Q_{i-1}+Q_i)/2.) With
+// all three on the nodes (plain trapezoidal), an alternating xi/kappa pattern satisfies both
+// defects at any amplitude while letting kappa undercut kappa_ref at speed-limiting nodes --
+// an exact odd-even null space the solver exploits for a spurious lap-time gain. The
+// staggered grid removes that mode structurally, so no regularization is needed.
+//
+// Lap time and energy are trapezoidal in 1/v with Q constant per segment:
+//   T = sum_i ds*Q_i*(1/v_i + 1/v_{i+1})/2,   E = sum_i ds*Q_i*(p_i/v_i + p_{i+1}/v_{i+1})/2
+// so the energy budget now counts the path actually driven, not the reference line.
 //
 // Variables, 6n: [x, u, n, xi, kappa, p_k] at offsets 0, n, 2n, 3n, 4n, 5n, where p_k is the
 // MGU-K deployment control (W/kg).
@@ -531,25 +544,16 @@ pub fn solve_min_time(inputs: &SolveInputs) -> Result<(Vec<f64>, f64, f64), Stri
 // offsets 0, n, 2n, 3n, 4n, 5n, plus the lap's ERS energy budget as a single row at 6n -- the
 // only constraint here that is not pointwise.
 //
-// The steering-rate rows bound (kappa[i+1]-kappa[i])^2 * x[i] -- i.e. |dkappa/ds|*v, the rate
+// The steering-rate rows bound (kappa[i+1]-kappa[i])^2 * x[i], i.e. |dkappa/ds|*v, the rate
 // the car re-aims itself in *time* (see api::steering_rate_limit). Without it a point mass
 // changes direction instantly and the free line exploits flicks no car could drive. Power is
 // unchanged from MinTimeProblem; the ellipse is the same functional form with kappa in place
-// of the fixed curvature; the x-defect carries the same h as dt/ds does, so speed changes are
-// integrated over the path actually driven rather than over the reference line.
-// n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly.
+// of the fixed curvature.
+// n=0, xi=0, kappa=kappa_ref reproduces MinTimeProblem exactly (Q = 1).
 //
-// Hessian terms beyond MinTimeProblem's (K=kappa_i, L=mu_lat, g=g_eff):
-//   d2E/dK2                      = 2*x^2/(L^2*g^2)
-//   d2E/dKdx                     = 4*x*K/(L^2*g^2) - 4*x^2*K*c_l/(L^2*g^3)
-//   d2f/dxdn                     = 0.5*ds*kappa_ref_i*x^-1.5
-//   d2(n-defect[i])/dxi_i dn_i     = ds*kappa_ref_i/2
-//   d2(n-defect[i])/dxi_i dn_{i+1} = ds*kappa_ref_{i+1}/2
-//   d2(xi-defect[i])/dK_i dn_i     = ds*kappa_ref_i
-//   d2(x-defect)/du_i dn_i         = ds*kappa_ref_i (from the defects both starting and
-//                                    ending at i -- see hessian_values)
-//   d2(rate[i])/dK_i2 = d2(rate[i])/dK_{i+1}2 = 2*x_i,  d2/dK_i dK_{i+1} = -2*x_i
-//   d2(rate[i])/dK_i dx_i = -2*(K_{i+1}-K_i),  d2/dK_{i+1} dx_i = 2*(K_{i+1}-K_i)
+// Hessian: see RacingLineProblem::hessian_terms. Everything Q scales is gathered into one
+// weight per segment, so the path-stretch dependence is derived once rather than per
+// constraint; the pattern comes from that same routine.
 
 /// Linearly interpolates n_left(s)/n_right(s) from the boundary CSV's own arc-length axis
 /// (FastF1's raw Distance channel, via track::load_boundaries) onto the solver's coarse
@@ -613,6 +617,23 @@ struct RacingLineProblem {
     n_right: Vec<f64>,
     initial_x: Vec<f64>,
     initial_u: Vec<f64>,
+    // Lower-triangular Hessian pattern, found once by running hessian_terms on a dummy point.
+    // Many terms land on the same (row, col), so values are accumulated through this index.
+    hess_pairs: Vec<(usize, usize)>,
+    hess_index: HashMap<(usize, usize), usize>,
+}
+
+/// One segment i -> i+1 of the staggered grid: the path-stretch factor Q = h/cos(xi) (path
+/// length driven per unit of reference-line length) and its first derivatives.
+#[derive(Clone, Copy)]
+struct Seg {
+    h: f64,    // mean of 1 - n*kappa_ref over the segment's two nodes
+    s: f64,    // sin(xi)
+    c: f64,    // cos(xi)
+    q: f64,    // h / c
+    q_ni: f64, // dQ/dn_i
+    q_nj: f64, // dQ/dn_{i+1}
+    q_xi: f64, // dQ/dxi_i
 }
 
 impl RacingLineProblem {
@@ -628,8 +649,173 @@ impl RacingLineProblem {
         G + self.params.c_l * x_i
     }
 
-    fn h(&self, n_i: f64, i: usize) -> f64 {
-        1.0 - n_i * self.curvature[i]
+    fn seg(&self, i: usize, ns: &[f64], xis: &[f64]) -> Seg {
+        let j = self.next(i);
+        let (ki, kj) = (self.curvature[i], self.curvature[j]);
+        let h = 1.0 - 0.5 * (ns[i] * ki + ns[j] * kj);
+        let (s, c) = xis[i].sin_cos();
+        Seg { h, s, c, q: h / c, q_ni: -0.5 * ki / c, q_nj: -0.5 * kj / c, q_xi: h * s / (c * c) }
+    }
+
+    fn segs(&self, x: &[f64]) -> Vec<Seg> {
+        let n = self.n;
+        (0..n).map(|i| self.seg(i, &x[2 * n..3 * n], &x[3 * n..4 * n])).collect()
+    }
+
+    /// Every second-derivative term of the Lagrangian obj_factor*f + sum(lambda*g), emitted
+    /// as (var, var, value). The same routine builds the sparsity pattern (on a dummy point)
+    /// and the values, so the two cannot disagree about which entries exist.
+    ///
+    /// Variable blocks: x, u, n, xi, kappa, p_k at offsets 0, n, 2n, 3n, 4n, 5n.
+    ///
+    /// The path-stretch factor Q_i = h_i/cos(xi_i) of each segment multiplies a weight V_i
+    /// that gathers everything Q_i scales: the lap-time and energy sums, the speed defect, and
+    /// the heading defects of the two nodes either side. So that part of the Lagrangian is
+    /// L_Q = sum_i Q_i*V_i, whose Hessian is
+    ///   Q_ab*V  +  Q_a*V_b  +  Q_b*V_a  +  Q*V_ab
+    /// over Q's variables (n_i, n_{i+1}, xi_i) and V's (x, u, p_k, kappa at i and i+1).
+    fn hessian_terms(
+        &self,
+        x: &[f64],
+        obj_factor: f64,
+        lambda: &[f64],
+        emit: &mut dyn FnMut(usize, usize, f64),
+    ) {
+        let n = self.n;
+        let ds = self.ds;
+        let xs = &x[0..n];
+        let us = &x[n..2 * n];
+        let kappas = &x[4 * n..5 * n];
+        let pks = &x[5 * n..6 * n];
+        let segs = self.segs(x);
+        let l_bud = lambda[6 * n];
+        let (ix, iu, i_n, ixi, ik, ip) = (
+            |i: usize| i,
+            |i: usize| n + i,
+            |i: usize| 2 * n + i,
+            |i: usize| 3 * n + i,
+            |i: usize| 4 * n + i,
+            |i: usize| 5 * n + i,
+        );
+
+        // Terms that stay local to a node: friction ellipse, power ceiling, steering rate.
+        for i in 0..n {
+            let prev_i = self.prev(i);
+            let ip1 = self.next(i);
+            let l = self.params.mu_lat;
+            let m = self.params.mu_lon;
+            let c_l = self.params.c_l;
+            let c_d = self.c_d[i];
+            let kap = kappas[i];
+            let g_eff = self.g_eff(xs[i]);
+            let w = us[i] + c_d * xs[i];
+            let lambda_ellipse = lambda[3 * n + i];
+            let lambda_power = lambda[4 * n + i];
+            let lambda_rate = lambda[5 * n + i];
+            let lambda_rate_prev = lambda[5 * n + prev_i];
+            let d_i = kappas[ip1] - kappas[i];
+            let d_prev = kappas[i] - kappas[prev_i];
+
+            let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
+                - 6.0 * c_l * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(4))
+                + 2.0
+                    * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
+                        - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
+                    / m.powi(2);
+            let d2p_dx2 = -0.75 * (self.params.p_ice + pks[i]) * xs[i].powf(-2.5);
+            let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
+            let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
+                - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
+            let d2e_dkappa2 = 2.0 * xs[i].powi(2) / (l.powi(2) * g_eff.powi(2));
+            let d2e_dkappadx = 4.0 * xs[i] * kap / (l.powi(2) * g_eff.powi(2))
+                - 4.0 * xs[i].powi(2) * kap * c_l / (l.powi(2) * g_eff.powi(3));
+
+            emit(ix(i), ix(i), lambda_ellipse * d2e_dx2 + lambda_power * d2p_dx2);
+            emit(iu(i), iu(i), lambda_ellipse * d2e_du2);
+            emit(iu(i), ix(i), lambda_ellipse * d2e_dxdu);
+            emit(
+                ik(i),
+                ik(i),
+                lambda_ellipse * d2e_dkappa2 + 2.0 * (lambda_rate * xs[i] + lambda_rate_prev * xs[prev_i]),
+            );
+            emit(ik(i), ix(i), lambda_ellipse * d2e_dkappadx - 2.0 * lambda_rate * d_i);
+            emit(ik(ip1), ik(i), -2.0 * lambda_rate * xs[i]);
+            emit(ik(i), ix(prev_i), 2.0 * lambda_rate_prev * d_prev);
+            emit(ip(i), ix(i), lambda_power * 0.5 * xs[i].powf(-1.5));
+        }
+
+        // Terms that run through a segment.
+        for i in 0..n {
+            let j = self.next(i);
+            let sg = segs[i];
+            let (ki, kj) = (self.curvature[i], self.curvature[j]);
+            let (s, c) = (sg.s, sg.c);
+            let l_x = lambda[i];
+            let l_off = lambda[n + i];
+            let l_head_i = lambda[2 * n + i];
+            let l_head_j = lambda[2 * n + j];
+
+            // Offset defect: n_{i+1} - n_i - ds*h*tan(xi).
+            emit(ixi(i), i_n(i), l_off * ds * ki / (2.0 * c * c));
+            emit(ixi(i), i_n(j), l_off * ds * kj / (2.0 * c * c));
+            emit(ixi(i), ixi(i), -l_off * ds * sg.h * 2.0 * s / (c * c * c));
+
+            // V_i: the weight on Q_i.
+            let (ci, cj) = (obj_factor + l_bud * pks[i], obj_factor + l_bud * pks[j]);
+            let v = 0.5 * ds * (ci * xs[i].powf(-0.5) + cj * xs[j].powf(-0.5))
+                - l_x * ds * (us[i] + us[j])
+                - 0.5 * ds * (l_head_i * kappas[i] + l_head_j * kappas[j]);
+            let v_xi = -0.25 * ds * ci * xs[i].powf(-1.5);
+            let v_xj = -0.25 * ds * cj * xs[j].powf(-1.5);
+            let v_pi = 0.5 * ds * l_bud * xs[i].powf(-0.5);
+            let v_pj = 0.5 * ds * l_bud * xs[j].powf(-0.5);
+            let v_u = -ds * l_x;
+            let v_ki = -0.5 * ds * l_head_i;
+            let v_kj = -0.5 * ds * l_head_j;
+
+            let q_vars = [(i_n(i), sg.q_ni), (i_n(j), sg.q_nj), (ixi(i), sg.q_xi)];
+            let v_vars = [
+                (ix(i), v_xi),
+                (ix(j), v_xj),
+                (iu(i), v_u),
+                (iu(j), v_u),
+                (ip(i), v_pi),
+                (ip(j), v_pj),
+                (ik(i), v_ki),
+                (ik(j), v_kj),
+            ];
+            for &(a, qa) in &q_vars {
+                for &(b, vb) in &v_vars {
+                    emit(a, b, qa * vb);
+                }
+            }
+            emit(ixi(i), i_n(i), -0.5 * ki * s / (c * c) * v);
+            emit(ixi(i), i_n(j), -0.5 * kj * s / (c * c) * v);
+            emit(ixi(i), ixi(i), sg.h * (1.0 + s * s) / (c * c * c) * v);
+
+            emit(ix(i), ix(i), sg.q * 0.375 * ds * ci * xs[i].powf(-2.5));
+            emit(ip(i), ix(i), sg.q * -0.25 * ds * l_bud * xs[i].powf(-1.5));
+            emit(ix(j), ix(j), sg.q * 0.375 * ds * cj * xs[j].powf(-2.5));
+            emit(ip(j), ix(j), sg.q * -0.25 * ds * l_bud * xs[j].powf(-1.5));
+        }
+    }
+
+    fn with_hessian_pattern(mut self) -> Self {
+        let n = self.n;
+        // Any strictly positive point will do: only which (row, col) pairs get emitted matters.
+        let mut x = vec![0.0; 6 * n];
+        x[0..n].copy_from_slice(&self.initial_x);
+        x[n..2 * n].copy_from_slice(&self.initial_u);
+        x[4 * n..5 * n].copy_from_slice(&self.curvature);
+        x[5 * n..6 * n].fill(self.initial_pk);
+        let lambda = vec![1.0; 6 * n + 1];
+        let mut pairs = BTreeSet::new();
+        self.hessian_terms(&x, 1.0, &lambda, &mut |a, b, _| {
+            pairs.insert((a.max(b), a.min(b)));
+        });
+        self.hess_pairs = pairs.into_iter().collect();
+        self.hess_index = self.hess_pairs.iter().enumerate().map(|(k, &p)| (p, k)).collect();
+        self
     }
 }
 
@@ -670,24 +856,33 @@ impl BasicProblem for RacingLineProblem {
         true
     }
 
+    // Lap time: sum over segments of Q_i*ds * mean(1/v) -- trapezoidal in 1/v, with the path
+    // stretch Q_i constant on the segment.
     fn objective(&self, x: &[Number], _new_x: bool, obj: &mut Number) -> bool {
         let n = self.n;
+        let segs = self.segs(x);
         *obj = (0..n)
-            .map(|i| self.ds * self.h(x[2 * n + i], i) / x[i].sqrt())
+            .map(|i| {
+                let j = self.next(i);
+                self.ds * segs[i].q * 0.5 * (x[i].powf(-0.5) + x[j].powf(-0.5))
+            })
             .sum();
         true
     }
 
     fn objective_grad(&self, x: &[Number], _new_x: bool, grad_f: &mut [Number]) -> bool {
         let n = self.n;
+        let segs = self.segs(x);
+        grad_f.fill(0.0);
         for i in 0..n {
-            let h_i = self.h(x[2 * n + i], i);
-            grad_f[i] = -0.5 * self.ds * h_i * x[i].powf(-1.5);
-            grad_f[n + i] = 0.0;
-            grad_f[2 * n + i] = -self.ds * self.curvature[i] / x[i].sqrt();
-            grad_f[3 * n + i] = 0.0;
-            grad_f[4 * n + i] = 0.0;
-            grad_f[5 * n + i] = 0.0;
+            let j = self.next(i);
+            let sg = segs[i];
+            let wf = 0.5 * (x[i].powf(-0.5) + x[j].powf(-0.5));
+            grad_f[i] += -0.25 * self.ds * sg.q * x[i].powf(-1.5);
+            grad_f[j] += -0.25 * self.ds * sg.q * x[j].powf(-1.5);
+            grad_f[2 * n + i] += self.ds * sg.q_ni * wf;
+            grad_f[2 * n + j] += self.ds * sg.q_nj * wf;
+            grad_f[3 * n + i] += self.ds * sg.q_xi * wf;
         }
         true
     }
@@ -699,8 +894,10 @@ impl ConstrainedProblem for RacingLineProblem {
         6 * self.n + 1
     }
 
+    // x-defect 7, offset defect 3, heading defect 6, ellipse 3, power 3, steering rate 3 per
+    // node, plus the budget row's four entries per node.
     fn num_constraint_jacobian_non_zeros(&self) -> usize {
-        24 * self.n
+        29 * self.n
     }
 
     fn constraint_bounds(&self, g_l: &mut [Number], g_u: &mut [Number]) -> bool {
@@ -708,9 +905,9 @@ impl ConstrainedProblem for RacingLineProblem {
         for i in 0..n {
             g_l[i] = 0.0; // x-defect: equality
             g_u[i] = 0.0;
-            g_l[n + i] = 0.0; // n-defect: equality
+            g_l[n + i] = 0.0; // offset defect: equality
             g_u[n + i] = 0.0;
-            g_l[2 * n + i] = 0.0; // xi-defect: equality
+            g_l[2 * n + i] = 0.0; // heading defect: equality
             g_u[2 * n + i] = 0.0;
             g_l[3 * n + i] = -1e20; // friction ellipse: <= 1
             g_u[3 * n + i] = 1.0;
@@ -728,25 +925,25 @@ impl ConstrainedProblem for RacingLineProblem {
         let n = self.n;
         let xs = &x[0..n];
         let us = &x[n..2 * n];
-        let ns = &x[2 * n..3 * n];
         let xis = &x[3 * n..4 * n];
         let kappas = &x[4 * n..5 * n];
         let pks = &x[5 * n..6 * n];
+        let segs = self.segs(x);
+        let ds = self.ds;
 
         for i in 0..n {
-            let ip1 = self.next(i);
-            g[i] = xs[ip1] - xs[i]
-                - self.ds * (us[i] * self.h(ns[i], i) + us[ip1] * self.h(ns[ip1], ip1));
+            let j = self.next(i);
+            g[i] = xs[j] - xs[i] - ds * segs[i].q * (us[i] + us[j]);
         }
         for i in 0..n {
-            let ip1 = self.next(i);
-            let h_mid = 0.5 * (self.h(ns[i], i) + self.h(ns[ip1], ip1));
-            g[n + i] = ns[ip1] - ns[i] - self.ds * xis[i] * h_mid;
+            let j = self.next(i);
+            let ns = &x[2 * n..3 * n];
+            g[n + i] = ns[j] - ns[i] - ds * segs[i].h * xis[i].tan();
         }
         for i in 0..n {
-            let im1 = self.prev(i);
-            g[2 * n + i] = xis[i] - xis[im1]
-                - self.ds * (kappas[i] * self.h(ns[i], i) - self.curvature[i]);
+            let m = self.prev(i);
+            g[2 * n + i] = xis[i] - xis[m]
+                - ds * (kappas[i] * 0.5 * (segs[m].q + segs[i].q) - self.curvature[i]);
         }
         for i in 0..n {
             let g_eff = self.g_eff(xs[i]);
@@ -763,67 +960,72 @@ impl ConstrainedProblem for RacingLineProblem {
             let d = kappas[self.next(i)] - kappas[i];
             g[5 * n + i] = d * d * xs[i];
         }
-        g[6 * n] = (0..n).map(|i| self.ds * pks[i] / xs[i].sqrt()).sum();
+        // Energy = integral of power over time, dt = Q*ds/v: trapezoidal like the lap time.
+        g[6 * n] = (0..n)
+            .map(|i| {
+                let j = self.next(i);
+                ds * segs[i].q
+                    * 0.5
+                    * (pks[i] * xs[i].powf(-0.5) + pks[j] * xs[j].powf(-0.5))
+            })
+            .sum();
         true
     }
 
     fn constraint_jacobian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
         let n = self.n;
         let mut k = 0;
+        let mut put = |row: usize, col: usize| {
+            irow[k] = row as Index;
+            jcol[k] = col as Index;
+            k += 1;
+        };
 
-        // x-defect row i: d/dx_i, d/dx_{i+1}, d/du_i, d/du_{i+1}, d/dn_i, d/dn_{i+1}
+        // x-defect row i: x_i, x_{i+1}, u_i, u_{i+1}, n_i, n_{i+1}, xi_i
         for i in 0..n {
-            let ip1 = self.next(i);
-            let row = i as Index;
-            irow[k] = row; jcol[k] = i as Index; k += 1;
-            irow[k] = row; jcol[k] = ip1 as Index; k += 1;
-            irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (n + ip1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + ip1) as Index; k += 1;
+            let j = self.next(i);
+            for col in [i, j, n + i, n + j, 2 * n + i, 2 * n + j, 3 * n + i] {
+                put(i, col);
+            }
         }
-        // n-defect row n+i: d/dn_i, d/dn_{i+1}, d/dxi_i
+        // offset-defect row n+i: n_i, n_{i+1}, xi_i
         for i in 0..n {
-            let ip1 = self.next(i);
-            let row = (n + i) as Index;
-            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + ip1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (3 * n + i) as Index; k += 1;
+            let j = self.next(i);
+            for col in [2 * n + i, 2 * n + j, 3 * n + i] {
+                put(n + i, col);
+            }
         }
-        // xi-defect row 2n+i: d/dxi_i, d/dxi_{i-1}, d/dkappa_i, d/dn_i
+        // heading-defect row 2n+i: xi_i, xi_{i-1}, kappa_i, n_{i-1}, n_i, n_{i+1}
         for i in 0..n {
-            let im1 = self.prev(i);
-            let row = (2 * n + i) as Index;
-            irow[k] = row; jcol[k] = (3 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (3 * n + im1) as Index; k += 1;
-            irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (2 * n + i) as Index; k += 1;
+            let m = self.prev(i);
+            let j = self.next(i);
+            for col in [3 * n + i, 3 * n + m, 4 * n + i, 2 * n + m, 2 * n + i, 2 * n + j] {
+                put(2 * n + i, col);
+            }
         }
-        // ellipse row 3n+i: d/dx_i, d/du_i, d/dkappa_i
+        // ellipse row 3n+i: x_i, u_i, kappa_i
         for i in 0..n {
-            let row = (3 * n + i) as Index;
-            irow[k] = row; jcol[k] = i as Index; k += 1;
-            irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
+            for col in [i, n + i, 4 * n + i] {
+                put(3 * n + i, col);
+            }
         }
-        // power row 4n+i: d/dx_i, d/du_i, d/dp_k_i
+        // power row 4n+i: x_i, u_i, p_k_i
         for i in 0..n {
-            let row = (4 * n + i) as Index;
-            irow[k] = row; jcol[k] = i as Index; k += 1;
-            irow[k] = row; jcol[k] = (n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (5 * n + i) as Index; k += 1;
+            for col in [i, n + i, 5 * n + i] {
+                put(4 * n + i, col);
+            }
         }
-        // steering-rate row 5n+i: d/dkappa_i, d/dkappa_{i+1}, d/dx_i
+        // steering-rate row 5n+i: kappa_i, kappa_{i+1}, x_i
         for i in 0..n {
-            let row = (5 * n + i) as Index;
-            irow[k] = row; jcol[k] = (4 * n + i) as Index; k += 1;
-            irow[k] = row; jcol[k] = (4 * n + self.next(i)) as Index; k += 1;
-            irow[k] = row; jcol[k] = i as Index; k += 1;
+            for col in [4 * n + i, 4 * n + self.next(i), i] {
+                put(5 * n + i, col);
+            }
         }
-        // budget row: every x_i and every p_k
+        // budget row: x_i, p_k_i, n_i, xi_i for every node
         for i in 0..n {
-            irow[k] = (6 * n) as Index; jcol[k] = i as Index; k += 1;
-            irow[k] = (6 * n) as Index; jcol[k] = (5 * n + i) as Index; k += 1;
+            for col in [i, 5 * n + i, 2 * n + i, 3 * n + i] {
+                put(6 * n, col);
+            }
         }
         true
     }
@@ -833,33 +1035,41 @@ impl ConstrainedProblem for RacingLineProblem {
         let ds = self.ds;
         let xs = &x[0..n];
         let us = &x[n..2 * n];
-        let ns = &x[2 * n..3 * n];
-        let xis = &x[3 * n..4 * n];
         let kappas = &x[4 * n..5 * n];
         let pks = &x[5 * n..6 * n];
+        let segs = self.segs(x);
         let mut k = 0;
+        let mut put = |v: f64| {
+            vals[k] = v;
+            k += 1;
+        };
 
         for i in 0..n {
-            let ip1 = self.next(i);
-            vals[k] = -1.0; k += 1;
-            vals[k] = 1.0; k += 1;
-            vals[k] = -ds * self.h(ns[i], i); k += 1;
-            vals[k] = -ds * self.h(ns[ip1], ip1); k += 1;
-            vals[k] = ds * us[i] * self.curvature[i]; k += 1;
-            vals[k] = ds * us[ip1] * self.curvature[ip1]; k += 1;
+            let j = self.next(i);
+            let sg = segs[i];
+            let usum = us[i] + us[j];
+            put(-1.0);
+            put(1.0);
+            put(-ds * sg.q);
+            put(-ds * sg.q);
+            put(-ds * sg.q_ni * usum);
+            put(-ds * sg.q_nj * usum);
+            put(-ds * sg.q_xi * usum);
+        }
+        for (i, sg) in segs.iter().enumerate() {
+            let t = sg.s / sg.c;
+            put(-1.0 + 0.5 * ds * self.curvature[i] * t);
+            put(1.0 + 0.5 * ds * self.curvature[self.next(i)] * t);
+            put(-ds * sg.h / (sg.c * sg.c));
         }
         for i in 0..n {
-            let ip1 = self.next(i);
-            let h_mid = 0.5 * (self.h(ns[i], i) + self.h(ns[ip1], ip1));
-            vals[k] = -1.0 + 0.5 * ds * xis[i] * self.curvature[i]; k += 1;
-            vals[k] = 1.0 + 0.5 * ds * xis[i] * self.curvature[ip1]; k += 1;
-            vals[k] = -ds * h_mid; k += 1;
-        }
-        for i in 0..n {
-            vals[k] = 1.0; k += 1;
-            vals[k] = -1.0; k += 1;
-            vals[k] = -ds * self.h(ns[i], i); k += 1;
-            vals[k] = ds * kappas[i] * self.curvature[i]; k += 1;
+            let (si, sm) = (segs[i], segs[self.prev(i)]);
+            put(1.0 - 0.5 * ds * kappas[i] * si.q_xi);
+            put(-1.0 - 0.5 * ds * kappas[i] * sm.q_xi);
+            put(-0.5 * ds * (sm.q + si.q));
+            put(-0.5 * ds * kappas[i] * sm.q_ni);
+            put(-0.5 * ds * kappas[i] * (sm.q_nj + si.q_ni));
+            put(-0.5 * ds * kappas[i] * si.q_nj);
         }
         // Ellipse E(x,u,kappa) = kappa^2*x^2/(L^2*g^2) + w^2/(M^2*g^2), g = G + c_l*x,
         // w = u + c_d*x (see the module comment).
@@ -871,61 +1081,48 @@ impl ConstrainedProblem for RacingLineProblem {
             let kap = kappas[i];
             let g_eff = self.g_eff(xs[i]);
             let w = us[i] + c_d * xs[i];
-            let de_dx = 2.0 * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(3))
-                + 2.0 * w * (c_d * g_eff - w * c_l) / (m.powi(2) * g_eff.powi(3));
-            let de_du = 2.0 * w / (m.powi(2) * g_eff.powi(2));
-            let de_dkappa = 2.0 * xs[i].powi(2) * kap / (l.powi(2) * g_eff.powi(2));
-            vals[k] = de_dx; k += 1;
-            vals[k] = de_du; k += 1;
-            vals[k] = de_dkappa; k += 1;
+            put(2.0 * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(3))
+                + 2.0 * w * (c_d * g_eff - w * c_l) / (m.powi(2) * g_eff.powi(3)));
+            put(2.0 * w / (m.powi(2) * g_eff.powi(2)));
+            put(2.0 * xs[i].powi(2) * kap / (l.powi(2) * g_eff.powi(2)));
         }
         for i in 0..n {
-            let dp_dx = 0.5 * (self.params.p_ice + pks[i]) * xs[i].powf(-1.5) + self.c_d[i];
-            vals[k] = dp_dx; k += 1;
-            vals[k] = 1.0; k += 1;
-            vals[k] = -xs[i].powf(-0.5); k += 1;
+            put(0.5 * (self.params.p_ice + pks[i]) * xs[i].powf(-1.5) + self.c_d[i]);
+            put(1.0);
+            put(-xs[i].powf(-0.5));
         }
         for i in 0..n {
             let d = kappas[self.next(i)] - kappas[i];
-            vals[k] = -2.0 * d * xs[i]; k += 1;
-            vals[k] = 2.0 * d * xs[i]; k += 1;
-            vals[k] = d * d; k += 1;
+            put(-2.0 * d * xs[i]);
+            put(2.0 * d * xs[i]);
+            put(d * d);
         }
+        // Budget B = sum_i ds*Q_i*W_i, W_i = mean over the segment's nodes of p_k/sqrt(x).
+        let w_seg: Vec<f64> = (0..n)
+            .map(|i| {
+                let j = self.next(i);
+                0.5 * (pks[i] * xs[i].powf(-0.5) + pks[j] * xs[j].powf(-0.5))
+            })
+            .collect();
         for i in 0..n {
-            vals[k] = -0.5 * self.ds * pks[i] * xs[i].powf(-1.5); k += 1;
-            vals[k] = self.ds * xs[i].powf(-0.5); k += 1;
+            let m = self.prev(i);
+            let q_sum = segs[m].q + segs[i].q;
+            put(-0.25 * ds * pks[i] * xs[i].powf(-1.5) * q_sum);
+            put(0.5 * ds * xs[i].powf(-0.5) * q_sum);
+            put(ds * (segs[i].q_ni * w_seg[i] + segs[m].q_nj * w_seg[m]));
+            put(ds * segs[i].q_xi * w_seg[i]);
         }
         true
     }
 
-    // Lower-triangular sparsity, 9 entries per node i -- every pair is local to node i except
-    // (xi_i, n_{i+1}), and row >= col holds for all of them since the variable blocks are
-    // ordered x < u < n < xi < kappa.
     fn num_hessian_non_zeros(&self) -> usize {
-        13 * self.n
+        self.hess_pairs.len()
     }
 
     fn hessian_indices(&self, irow: &mut [Index], jcol: &mut [Index]) -> bool {
-        let n = self.n;
-        for i in 0..n {
-            let ip1 = self.next(i);
-            let k = 13 * i;
-            irow[k] = i as Index; jcol[k] = i as Index; // (x_i, x_i)
-            irow[k + 1] = (n + i) as Index; jcol[k + 1] = (n + i) as Index; // (u_i, u_i)
-            irow[k + 2] = (n + i) as Index; jcol[k + 2] = i as Index; // (u_i, x_i)
-            irow[k + 3] = (4 * n + i) as Index; jcol[k + 3] = (4 * n + i) as Index; // (kappa_i, kappa_i)
-            irow[k + 4] = (4 * n + i) as Index; jcol[k + 4] = i as Index; // (kappa_i, x_i)
-            irow[k + 5] = (2 * n + i) as Index; jcol[k + 5] = i as Index; // (n_i, x_i)
-            irow[k + 6] = (3 * n + i) as Index; jcol[k + 6] = (2 * n + i) as Index; // (xi_i, n_i)
-            irow[k + 7] = (3 * n + i) as Index; jcol[k + 7] = (2 * n + ip1) as Index; // (xi_i, n_{i+1})
-            irow[k + 8] = (4 * n + i) as Index; jcol[k + 8] = (2 * n + i) as Index; // (kappa_i, n_i)
-            irow[k + 9] = (2 * n + i) as Index; jcol[k + 9] = (n + i) as Index; // (n_i, u_i)
-            // steering rate: (kappa_{i+1}, kappa_i) -- ordered by variable index so row >= col
-            // holds across the wraparound -- and (kappa_i, x_{i-1}) from the defect ending at i.
-            let (kap_a, kap_b) = (4 * n + i, 4 * n + ip1);
-            irow[k + 10] = kap_a.max(kap_b) as Index; jcol[k + 10] = kap_a.min(kap_b) as Index;
-            irow[k + 11] = (4 * n + i) as Index; jcol[k + 11] = self.prev(i) as Index;
-            irow[k + 12] = (5 * n + i) as Index; jcol[k + 12] = i as Index; // (p_k_i, x_i)
+        for (k, &(r, c)) in self.hess_pairs.iter().enumerate() {
+            irow[k] = r as Index;
+            jcol[k] = c as Index;
         }
         true
     }
@@ -938,76 +1135,11 @@ impl ConstrainedProblem for RacingLineProblem {
         lambda: &[Number],
         vals: &mut [Number],
     ) -> bool {
-        let n = self.n;
-        let ds = self.ds;
-        let xs = &x[0..n];
-        let us = &x[n..2 * n];
-        let kappas = &x[4 * n..5 * n];
-        let pks = &x[5 * n..6 * n];
-
-        for i in 0..n {
-            let ip1 = self.next(i);
-            let l = self.params.mu_lat;
-            let m = self.params.mu_lon;
-            let c_l = self.params.c_l;
-            let c_d = self.c_d[i];
-            let kap = kappas[i];
-            let g_eff = self.g_eff(xs[i]);
-            let w = us[i] + c_d * xs[i];
-            let h_i = self.h(x[2 * n + i], i);
-
-            let prev_i = self.prev(i);
-            let lambda_x_defect = lambda[i];
-            let lambda_x_defect_prev = lambda[prev_i];
-            let lambda_rate = lambda[5 * n + i];
-            let lambda_rate_prev = lambda[5 * n + prev_i];
-            let d_i = kappas[ip1] - kappas[i];
-            let d_prev = kappas[i] - kappas[prev_i];
-            let lambda_n_defect = lambda[n + i];
-            let lambda_xi_defect = lambda[2 * n + i];
-            let lambda_ellipse = lambda[3 * n + i];
-            let lambda_power = lambda[4 * n + i];
-            let lambda_budget = lambda[6 * n];
-
-            let d2f_dx2 = h_i * 0.75 * ds * xs[i].powf(-2.5);
-            let d2e_dx2 = 2.0 * kap.powi(2) * G / (l.powi(2) * g_eff.powi(3))
-                - 6.0 * c_l * kap.powi(2) * xs[i] * G / (l.powi(2) * g_eff.powi(4))
-                + 2.0
-                    * ((c_d * c_d * g_eff - c_d * c_l * w) / g_eff.powi(3)
-                        - 3.0 * c_l * (c_d * g_eff * w - c_l * w * w) / g_eff.powi(4))
-                    / m.powi(2);
-            let d2p_dx2 = -0.75 * (self.params.p_ice + pks[i]) * xs[i].powf(-2.5);
-            let d2b_dx2 = 0.75 * self.ds * pks[i] * xs[i].powf(-2.5);
-            let d2e_du2 = 2.0 / (m.powi(2) * g_eff.powi(2));
-            let d2e_dxdu = 2.0 * c_d / (m.powi(2) * g_eff.powi(2))
-                - 4.0 * c_l * w / (m.powi(2) * g_eff.powi(3));
-            let d2e_dkappa2 = 2.0 * xs[i].powi(2) / (l.powi(2) * g_eff.powi(2));
-            let d2e_dkappadx = 4.0 * xs[i] * kap / (l.powi(2) * g_eff.powi(2))
-                - 4.0 * xs[i].powi(2) * kap * c_l / (l.powi(2) * g_eff.powi(3));
-            let d2f_dxdn = 0.5 * ds * self.curvature[i] * xs[i].powf(-1.5);
-
-            let k = 13 * i;
-            vals[k] = obj_factor * d2f_dx2
-                + lambda_ellipse * d2e_dx2
-                + lambda_power * d2p_dx2
-                + lambda_budget * d2b_dx2;
-            vals[k + 1] = lambda_ellipse * d2e_du2;
-            vals[k + 2] = lambda_ellipse * d2e_dxdu;
-            vals[k + 3] = lambda_ellipse * d2e_dkappa2
-                + 2.0 * (lambda_rate * xs[i] + lambda_rate_prev * xs[prev_i]);
-            vals[k + 4] = lambda_ellipse * d2e_dkappadx - 2.0 * lambda_rate * d_i;
-            vals[k + 5] = obj_factor * d2f_dxdn;
-            vals[k + 6] = lambda_n_defect * 0.5 * ds * self.curvature[i];
-            vals[k + 7] = lambda_n_defect * 0.5 * ds * self.curvature[ip1];
-            vals[k + 8] = lambda_xi_defect * ds * self.curvature[i];
-            // u_i appears in the x-defect starting at i and the one ending at i.
-            vals[k + 9] =
-                (lambda_x_defect + lambda_x_defect_prev) * ds * self.curvature[i];
-            vals[k + 10] = -2.0 * lambda_rate * xs[i];
-            vals[k + 11] = 2.0 * lambda_rate_prev * d_prev;
-            vals[k + 12] = lambda_power * 0.5 * xs[i].powf(-1.5)
-                - lambda_budget * 0.5 * self.ds * xs[i].powf(-1.5);
-        }
+        vals.fill(0.0);
+        let index = &self.hess_index;
+        self.hessian_terms(x, obj_factor, lambda, &mut |a, b, v| {
+            vals[index[&(a.max(b), a.min(b))]] += v;
+        });
         true
     }
 }
@@ -1055,7 +1187,9 @@ pub fn solve_racing_line(
         })
         .collect();
     let u_bound = 10.0 * G;
-    let xi_bound = 0.3; // rad (~17 deg), numerical safety rail on the small-angle approximation, not a physical limit
+    // Domain guard only: tan(xi) and 1/cos(xi) are singular at 90 degrees. 1.2 rad (69 deg) is
+    // far beyond any heading a racing line takes; the tests assert the solution stays clear of it.
+    let xi_bound = 1.2;
     let max_abs_kappa = curvature.iter().cloned().fold(0.0_f64, |acc, k| acc.max(k.abs()));
     let kappa_bound = 3.0 * max_abs_kappa + 0.05; // loose box; the ellipse constraint binds first, as with u_bound
     let curvature_ref = curvature.clone(); // kept for the pure-lap-time recompute below, after `curvature` moves into `problem`
@@ -1078,7 +1212,10 @@ pub fn solve_racing_line(
         n_right,
         initial_x,
         initial_u,
-    };
+        hess_pairs: Vec::new(),
+        hess_index: HashMap::new(),
+    }
+    .with_hessian_pattern();
 
     let mut ipopt = Ipopt::new(problem).unwrap();
     ipopt.set_option("hessian_approximation", "exact");
@@ -1099,8 +1236,184 @@ pub fn solve_racing_line(
 
     let velocity: Vec<f64> = solution.primal_variables[0..n].iter().map(|x| x.sqrt()).collect();
     let n_profile: Vec<f64> = solution.primal_variables[2 * n..3 * n].to_vec();
+    // Same trapezoid as the objective: Q_i*ds per segment, mean of 1/v over its two nodes.
+    let xi_profile = &solution.primal_variables[3 * n..4 * n];
     let lap_time: f64 = (0..n)
-        .map(|i| ds * (1.0 - n_profile[i] * curvature_ref[i]) / velocity[i])
+        .map(|i| {
+            let j = (i + 1) % n;
+            let h = 1.0 - 0.5 * (n_profile[i] * curvature_ref[i] + n_profile[j] * curvature_ref[j]);
+            ds * h / xi_profile[i].cos() * 0.5 * (1.0 / velocity[i] + 1.0 / velocity[j])
+        })
         .sum();
     Ok((velocity, n_profile, lap_time, ds))
+}
+
+#[cfg(test)]
+mod derivative_tests {
+    //! The racing-line problem's hand-derived Jacobian and Hessian against central finite
+    //! differences, at a point away from every symmetry (nonzero offset, heading, curvature
+    //! deviation and deployment, varying DRS). Ipopt's own derivative_test checks the same
+    //! thing but only when someone remembers to switch it on and read the output.
+    use super::*;
+
+    const N: usize = 14;
+
+    /// Small deterministic generator in [lo, hi); no dependency needed for a test fixture.
+    fn lcg(state: &mut u64, lo: f64, hi: f64) -> f64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lo + (hi - lo) * ((*state >> 11) as f64 / (1u64 << 53) as f64)
+    }
+
+    fn problem() -> (RacingLineProblem, Vec<f64>, Vec<f64>) {
+        let params = CarParams {
+            mu_lat: 1.6,
+            mu_lon: 1.55,
+            c_l: 0.006,
+            c_d: 0.0015,
+            c_d_drs: 0.0013,
+            p_ice: 625_000.0 / 734.0,
+            p_mguk: 120_000.0 / 734.0,
+        };
+        let mut st = 7u64;
+        let curvature: Vec<f64> = (0..N)
+            .map(|i| 0.012 * (2.0 * std::f64::consts::PI * i as f64 / N as f64).sin() + 0.004)
+            .collect();
+        let c_d: Vec<f64> = (0..N).map(|i| if i % 3 == 0 { params.c_d_drs } else { params.c_d }).collect();
+        let mut x = vec![0.0; 6 * N];
+        for i in 0..N {
+            x[i] = lcg(&mut st, 300.0, 900.0);
+            x[N + i] = lcg(&mut st, -5.0, 5.0);
+            x[2 * N + i] = lcg(&mut st, -2.0, 2.0);
+            x[3 * N + i] = lcg(&mut st, -0.3, 0.3);
+            x[4 * N + i] = curvature[i] + lcg(&mut st, -0.004, 0.004);
+            x[5 * N + i] = lcg(&mut st, 5.0, 150.0);
+        }
+        let lambda: Vec<f64> = (0..6 * N + 1).map(|_| lcg(&mut st, 0.2, 1.5)).collect();
+        let p = RacingLineProblem {
+            curvature,
+            params,
+            c_d,
+            ds: 5.0,
+            n: N,
+            x_min: 25.0,
+            x_max: 10_000.0,
+            u_bound: 98.0,
+            xi_bound: 1.2,
+            kappa_bound: 0.3,
+            rate_bound_sq: 1e20,
+            ers_budget: 5000.0,
+            initial_pk: 50.0,
+            n_left: vec![3.0; N],
+            n_right: vec![-3.0; N],
+            initial_x: x[0..N].to_vec(),
+            initial_u: x[N..2 * N].to_vec(),
+            hess_pairs: Vec::new(),
+            hess_index: HashMap::new(),
+        }
+        .with_hessian_pattern();
+        (p, x, lambda)
+    }
+
+    fn jacobian_dense(p: &RacingLineProblem, x: &[f64]) -> Vec<Vec<f64>> {
+        let m = p.num_constraints();
+        let nnz = p.num_constraint_jacobian_non_zeros();
+        let (mut ir, mut jc) = (vec![0; nnz], vec![0; nnz]);
+        p.constraint_jacobian_indices(&mut ir, &mut jc);
+        let mut v = vec![0.0; nnz];
+        p.constraint_jacobian_values(x, true, &mut v);
+        let mut d = vec![vec![0.0; 6 * N]; m];
+        for k in 0..nnz {
+            d[ir[k] as usize][jc[k] as usize] += v[k];
+        }
+        d
+    }
+
+    fn gradient_of_lagrangian(p: &RacingLineProblem, x: &[f64], obj: f64, lambda: &[f64]) -> Vec<f64> {
+        let mut g = vec![0.0; 6 * N];
+        p.objective_grad(x, true, &mut g);
+        let mut out: Vec<f64> = g.iter().map(|v| obj * v).collect();
+        for (row, lam) in jacobian_dense(p, x).iter().zip(lambda) {
+            for (o, r) in out.iter_mut().zip(row) {
+                *o += lam * r;
+            }
+        }
+        out
+    }
+
+    fn worst(a: f64, b: f64) -> f64 {
+        (a - b).abs() / (1.0 + a.abs().max(b.abs()))
+    }
+
+    #[test]
+    fn jacobian_and_objective_gradient_match_finite_differences() {
+        let (p, x, _) = problem();
+        let eps = 1e-6;
+        let m = p.num_constraints();
+        let jac = jacobian_dense(&p, &x);
+        let mut grad = vec![0.0; 6 * N];
+        p.objective_grad(&x, true, &mut grad);
+
+        let mut worst_jac = 0.0_f64;
+        let mut worst_grad = 0.0_f64;
+        for c in 0..6 * N {
+            let (mut xp, mut xm) = (x.clone(), x.clone());
+            xp[c] += eps;
+            xm[c] -= eps;
+            let (mut gp, mut gm) = (vec![0.0; m], vec![0.0; m]);
+            p.constraint(&xp, true, &mut gp);
+            p.constraint(&xm, true, &mut gm);
+            for r in 0..m {
+                worst_jac = worst_jac.max(worst(jac[r][c], (gp[r] - gm[r]) / (2.0 * eps)));
+            }
+            let (mut fp, mut fm) = (0.0, 0.0);
+            p.objective(&xp, true, &mut fp);
+            p.objective(&xm, true, &mut fm);
+            worst_grad = worst_grad.max(worst(grad[c], (fp - fm) / (2.0 * eps)));
+        }
+        assert!(worst_jac < 1e-6, "Jacobian off by {worst_jac:.3e} from finite differences");
+        assert!(worst_grad < 1e-6, "objective gradient off by {worst_grad:.3e}");
+    }
+
+    #[test]
+    fn hessian_matches_finite_differences_everywhere() {
+        let (p, x, lambda) = problem();
+        let obj = 0.7;
+        let eps = 1e-5;
+        let nv = 6 * N;
+
+        let nnz = p.num_hessian_non_zeros();
+        let (mut ir, mut jc) = (vec![0; nnz], vec![0; nnz]);
+        p.hessian_indices(&mut ir, &mut jc);
+        let mut v = vec![0.0; nnz];
+        p.hessian_values(&x, true, obj, &lambda, &mut v);
+        let mut analytic = vec![vec![0.0; nv]; nv];
+        for k in 0..nnz {
+            let (r, c) = (ir[k] as usize, jc[k] as usize);
+            assert!(r >= c, "entry ({r},{c}) is above the diagonal");
+            analytic[r][c] += v[k];
+            if r != c {
+                analytic[c][r] += v[k];
+            }
+        }
+
+        // Dense finite-difference Hessian: any true nonzero missing from the pattern shows up
+        // here as a mismatch against the analytic zero.
+        let mut worst_h = 0.0_f64;
+        let mut at = (0, 0);
+        for c in 0..nv {
+            let (mut xp, mut xm) = (x.clone(), x.clone());
+            xp[c] += eps;
+            xm[c] -= eps;
+            let gp = gradient_of_lagrangian(&p, &xp, obj, &lambda);
+            let gm = gradient_of_lagrangian(&p, &xm, obj, &lambda);
+            for r in 0..nv {
+                let err = worst(analytic[r][c], (gp[r] - gm[r]) / (2.0 * eps));
+                if err > worst_h {
+                    worst_h = err;
+                    at = (r, c);
+                }
+            }
+        }
+        assert!(worst_h < 1e-5, "Hessian off by {worst_h:.3e} at {at:?} (blocks x,u,n,xi,kappa,p of {N})");
+    }
 }

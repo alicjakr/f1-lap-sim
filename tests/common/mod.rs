@@ -88,22 +88,30 @@ pub fn corner_and_straight(radius_m: f64, straight_m: f64) -> Vec<f64> {
     k
 }
 
-/// Heading angle on each segment, inverted from the solver's own n-defect:
-///   n[i+1] - n[i] = ds * xi[i] * (h[i] + h[i+1]) / 2
+/// Path-stretch factor of segment i -> i+1: Q = h_mid / cos(xi), with h_mid the mean of
+/// 1 - n*kappa_ref over its two nodes. Mirrors RacingLineProblem::seg.
+fn segment_stretch(n_profile: &[f64], kappa_ref: &[f64], i: usize, xi: f64) -> f64 {
+    let n = n_profile.len();
+    let j = (i + 1) % n;
+    let h_mid = 1.0 - 0.5 * (n_profile[i] * kappa_ref[i] + n_profile[j] * kappa_ref[j]);
+    h_mid / xi.cos()
+}
+
+/// Heading angle on each segment, inverted from the solver's own offset defect:
+///   n[i+1] - n[i] = ds * h_mid[i] * tan(xi[i])
 pub fn heading_from_offsets(n_profile: &[f64], kappa_ref: &[f64], ds: f64) -> Vec<f64> {
     let n = n_profile.len();
-    let h = |i: usize| 1.0 - n_profile[i] * kappa_ref[i];
     (0..n)
         .map(|i| {
             let j = (i + 1) % n;
-            let h_mid = 0.5 * (h(i) + h(j));
-            (n_profile[j] - n_profile[i]) / (ds * h_mid)
+            let h_mid = 1.0 - 0.5 * (n_profile[i] * kappa_ref[i] + n_profile[j] * kappa_ref[j]);
+            ((n_profile[j] - n_profile[i]) / (ds * h_mid)).atan()
         })
         .collect()
 }
 
-/// Path curvature at each node, inverted from the solver's own xi-defect:
-///   xi[i] - xi[i-1] = ds * (kappa[i]*h[i] - kappa_ref[i])
+/// Path curvature at each node, inverted from the solver's own heading defect:
+///   xi[i] - xi[i-1] = ds * (kappa[i] * (Q[i-1] + Q[i]) / 2 - kappa_ref[i])
 pub fn curvature_from_heading(
     xi: &[f64],
     n_profile: &[f64],
@@ -114,8 +122,10 @@ pub fn curvature_from_heading(
     (0..n)
         .map(|i| {
             let im1 = (i + n - 1) % n;
-            let h = 1.0 - n_profile[i] * kappa_ref[i];
-            ((xi[i] - xi[im1]) / ds + kappa_ref[i]) / h
+            let q_mid = 0.5
+                * (segment_stretch(n_profile, kappa_ref, im1, xi[im1])
+                    + segment_stretch(n_profile, kappa_ref, i, xi[i]));
+            ((xi[i] - xi[im1]) / ds + kappa_ref[i]) / q_mid
         })
         .collect()
 }
