@@ -1320,3 +1320,101 @@ That reframes the item. The missing `1/cos(xi)` is not an independent 1% correct
 weighed on its own merits: it is one half of an approximation whose other half is being held
 together by a constant worth seconds. The argument for doing the exact trigonometry is not the
 1% — it is that doing it would let an arbitrary constant be **deleted** rather than tuned.
+
+
+# V13 — Exact Path Geometry in the Racing Line
+
+## What changed
+
+V12 ended on the observation that the racing line's small-angle approximation (`tan ξ = ξ`,
+`cos ξ = 1`) was held together by a "safety rail" on `ξ` worth seconds, and that the honest fix
+was to do the trigonometry exactly and delete the rail rather than tune it. That is this
+version. Nothing about the fixed-line solver changed.
+
+With `h = 1 − n·κ_ref` and `Q = h/cos ξ` (path driven per unit of reference line), per segment
+of the staggered grid:
+
+```
+x-defect[i]  = x[i+1] − x[i] − ds·Q_i·(u[i] + u[i+1])
+n-defect[i]  = n[i+1] − n[i] − ds·h_mid_i·tan ξ_i
+ξ-defect[i]  = ξ[i] − ξ[i−1] − ds·(κ[i]·(Q_{i−1} + Q_i)/2 − κ_ref[i])
+lap time     = Σ ds·Q_i·(1/v_i + 1/v_{i+1})/2
+energy       = Σ ds·Q_i·(p_i/v_i + p_{i+1}/v_{i+1})/2
+```
+
+Three things in that are corrections rather than refinements:
+
+- **The `1/cos ξ` path length** — the item the external review flagged, now in all five places
+  it belongs (objective, speed defect, offset defect, heading defect, energy).
+- **`tan ξ` in the offset equation** — `dn/dpath = sin ξ`, so `dn/ds = h·tan ξ`.
+- **The energy budget now counts the path driven.** It used `ds·p_k/√x` on the reference line;
+  a car that drives 3% more path spends 3% more energy. (Backlog item 5.)
+
+`ξ` keeps a bound of 1.2 rad, but only as a domain guard (`tan` and `1/cos` are singular at
+90°). The invariant test asserts its fixture's solution stays under half of it; on the real circuits
+the largest heading is 0.8 rad (below), so it does not act as a constraint there either.
+
+All Jacobian and Hessian entries were re-derived. The Hessian is now built by one routine that
+emits every second-derivative term, used for both the sparsity pattern and the values, so they
+cannot disagree about which entries exist. Everything that `Q_i` scales is gathered into one
+weight per segment, so its dependence is derived once instead of once per constraint.
+
+## Verification
+
+- Two new unit tests compare every Jacobian entry, the objective gradient and the **entire
+  dense** Lagrangian Hessian against central finite differences at a point with nonzero offset,
+  heading, curvature deviation, deployment and varying DRS. Comparing against a dense Hessian
+  means a nonzero entry missing from the pattern fails too. Both tests were checked by
+  deliberately breaking a Hessian weight and a budget Jacobian entry: each fails, at 7e-2 and
+  9e-2, against a pass threshold of 1e-5 and 1e-6.
+- All nine existing invariant tests pass, including zero-width-equals-fixed-line. The test
+  helpers that reconstruct `ξ` and `κ` from the solution were updated to the exact relations.
+- The pinned-width regression is unchanged: 0.000 s at zero width on all three circuits, and
+  the 1 cm residual unchanged to the millisecond (−0.246, −0.299, −0.801 s). The exact geometry
+  neither opened nor closed the sub-grid weave.
+
+## Result
+
+| | before (V12) | after |
+|---|---|---|
+| fixed line vs real poles | +11.0% | +11.0% (untouched) |
+| racing line vs real poles | −4.6% (sd 4.3) | **−6.1% (sd 5.2)** |
+| mean racing-line lap time change | | −1.35 s |
+
+Largest moves: Singapore −5.95 s, Melbourne −3.70 s, Mexico −3.39 s, Yas Marina −3.00 s,
+Sochi −2.70 s, Baku −2.33 s. Thirteen circuits move by under 0.8 s, and Hungaroring and Spa by
++0.01 and +0.05 s (the only two that got slower).
+
+That is the opposite sign to what V12 predicted ("about 1% *slower*"), and the reason is that
+two effects were being compared as if one were the whole story. Exact path length does cost
+time, as predicted. But removing the 0.3 rad rail gives back more than that, because the rail
+had been binding on every circuit: V12's sweep already showed 0.3 → 0.45 buys 1.8 s on average.
+The net is faster on 19 of 21 circuits.
+
+The heading no longer sits on a bound. The largest value on any circuit is about 0.8 rad (46°,
+Bahrain), against a guard of 1.2, estimated from the exported offsets with `h ≈ 1`. But the
+solver still uses `|ξ| > 0.3` on 2.4% of the lap on average, up to 6% at Mexico and Yas Marina.
+Nothing in a point mass makes crossing the track at 20–45° expensive, and nothing here should:
+adding a cap back would reintroduce exactly the undeclared constant this version removed. The
+real remedy is a vehicle model in which heading rate costs something (yaw inertia, slip angle),
+which is the bicycle model.
+
+## What this does and does not change about the conclusions
+
+The direction is the more correct one and the number is worse, which is the situation
+`accuracy-over-results` describes. The racing line was already an upper bound; it is now a
+looser one at −6.1%, and its spread across circuits grew (sd 4.3 → 5.2), driven by the circuits
+that had been most constrained by the rail (Singapore −18.8%, Melbourne −16.5%, Hungaroring
+−12.2%).
+
+Still open, and not touched here:
+
+- **The sub-grid weave** — the friction ellipse is enforced only at collocation points. Enforcing
+  it between nodes, or moving to Hermite-Simpson collocation, is the next formulation fix and is
+  measurable with the same 1 cm test.
+- **Harvesting, drivetrain efficiency, rolling resistance** — unchanged.
+- **The grip law** — see `python_scripts/measure_ggv.py --apex`. Driver median apex g exceeds
+  the solver's own ceiling by 14–38% below ~50 m/s, so the `mu_lat = 1.6`, `c_l ≈ 0.0052` pair
+  has the wrong shape; the data cannot say whether a higher constant μ or load-sensitive tyres is
+  the better fix.
+

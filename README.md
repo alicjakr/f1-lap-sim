@@ -15,7 +15,7 @@ the solver lands **+11.0% off real qualifying pole times** across all 21 circuit
 | mode | solves for | vs. real 2018 poles |
 |---|---|---|
 | `optimal` | the speed profile, pinned to the driven lap | **+11.0%** — the validated number |
-| `racingline` | the speed profile *and* the line, within the track width | **−4.6%** — an upper bound |
+| `racingline` | the speed profile *and* the line, within the track width | **−6.1%** — an upper bound |
 
 `racingline` is the more complete model: it contains the fixed-line case exactly (a zero
 lateral offset), so it can never solve slower, and that identity is used as a built-in
@@ -163,9 +163,10 @@ The scripts, each with a fuller docstring at the top of its file:
   python python_scripts/check_solver.py --compare results/solver_baseline.json
   ```
 
-  There are no `cargo test` unit tests yet — correctness is currently checked end-to-end
-  through this script and `validate_pole_times.py`; proper Rust-side tests and CI are
-  planned.
+  `cargo test --release` covers the solver's invariants on synthetic tracks (closed forms,
+  monotonicity, feasibility of the returned profile) and checks every analytic Jacobian and
+  Hessian entry against finite differences. This script and `validate_pole_times.py` remain
+  the end-to-end checks on real circuits; CI is still planned.
 - **`plot_racing_line.py`** — plots a solved line against the boundaries, coloured by speed.
 
 <details>
@@ -219,10 +220,10 @@ Not modelled:
   couldn't.
 - **A sub-grid artifact** — give the car 1 cm of lateral freedom and it still finds 0.3–1.1 s
   by weaving, because the grip limit is enforced only at sample points.
-- **An arbitrary constant shapes the free racing line.** The heading angle is capped at 0.3 rad
-  as a numerical rail for a small-angle approximation, but the solver sits on that cap, and
-  varying it across its plausible range moves lap time by several seconds per circuit. Affects
-  `racingline` only — the fixed line holds the heading at zero. See V12.
+- **The free racing line uses headings no real car could.** The path geometry is now exact (no
+  small-angle approximation, no heading cap — V13), and the solver still turns to over 0.3 rad
+  relative to the track on about 2% of the lap, up to 0.8 rad at Bahrain. A point mass has no
+  yaw inertia or slip angle to make that expensive. Affects `racingline` only.
 - **No harvesting** — the MGU-K's 4 MJ is granted rather than earned under braking, and can
   be spent anywhere on the lap.
 - **No tyre wear, fuel burn, track evolution, elevation or banking.** Reasonable for a single
