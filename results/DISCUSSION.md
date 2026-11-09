@@ -1399,6 +1399,35 @@ adding a cap back would reintroduce exactly the undeclared constant this version
 real remedy is a vehicle model in which heading rate costs something (yaw inertia, slip angle),
 which is the bicycle model.
 
+## A convergence regression, and its cause
+
+The first run of this version made the racing line far slower to solve: Bahrain took 685 Ipopt
+iterations and 72 s, Singapore 441 iterations and 46 s, against 30-40 iterations before, and
+the regression tool went from ~30 s to over 9 minutes. The answers were right (Bahrain's
+objective, 85.1486 s, matches the lap time recomputed from the returned profile) — the route
+to them was not.
+
+The iteration log showed the cause. From the infeasible warm start, Ipopt's adaptive barrier
+rule raised mu to ~6e5, which pulls iterates toward the middle of every variable box. With the
+heading box at ±0.3 rad that is harmless; at ±1.2 rad it is not, and the solver sat at a
+feasible but poor point (objective ~137 s on Bahrain) with Hessian regularisation around 1e10
+for ~600 iterations until restoration found the way out, after which it converged in ~25. So
+the old cap had also been doing an unadvertised numerical job — keeping Ipopt out of a bad
+region — alongside the physical one this version removed.
+
+Fix: a monotone barrier schedule with a small start (`mu_init = 1e-3`) for the racing-line
+solver only. Every lap time is unchanged to within 1 ms on all 21 circuits; the full
+regression run takes ~97 s and the slowest single circuit 11 s. `mu_init` between 1e-3 and
+1e-2 performed alike; 1e-1 and the adaptive rule capped at mu = 1 were worse. Iteration counts
+remain high compared with the small-angle formulation (hundreds, not tens), so a better warm
+start — one that satisfies the collocation defects — is the sensible next thing to try, rather
+than further option tuning.
+
+One test moved with it: `zero_width_reduces_to_the_fixed_line` compared the two solvers to
+1e-6 s absolute, which only held while they took identical barrier routes. It now compares at
+1e-5 relative, the solvers' own precision; the bugs it was written to catch were 1e-3 to 1e-1
+relative.
+
 ## What this does and does not change about the conclusions
 
 The direction is the more correct one and the number is worse, which is the situation

@@ -114,8 +114,8 @@ structurally rather than penalising it.
 The model includes a friction ellipse (braking and cornering share one grip budget),
 per-circuit downforce and drag derived from each track's own telemetry, DRS only where the
 real car had it open, the MGU-K's 4 MJ-per-lap energy budget as a control the solver places,
-and a steering-rate limit taken from the real lap. All 21 circuits converge in about a
-second.
+and a steering-rate limit taken from the real lap. All 21 circuits converge: the fixed line in
+under a second, the racing line in 2-11 seconds (about 90 s for the full set).
 
 The repo is split in two:
 
