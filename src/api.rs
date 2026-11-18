@@ -232,6 +232,10 @@ pub struct RacingLineResult {
     pub y_right: Vec<f64>,
     pub n_profile: Vec<f64>,
     pub speed_kmh: Vec<f64>,
+    pub u: Vec<f64>,
+    pub kappa: Vec<f64>,
+    pub a_lat: Vec<f64>,
+    pub grip_usage: Vec<f64>,
 }
 
 /// Runs the full racing-line pipeline for one track (geometry, boundaries, free-lateral-
@@ -264,9 +268,17 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
         omega_max,
         ers_budget: Some(ERS_BUDGET_J_PER_KG),
     };
-    let (v_final, n_profile, lap_time_s, ds_coarse) =
+    let racing_line_solution =
         solve_racing_line(&inputs, &bound_s, &n_left, &n_right)
             .map_err(|e| format!("racing-line solve for {:?}: {}", track, e))?;
+    let v_final = racing_line_solution.velocity;
+    let lap_time_s = racing_line_solution.lap_time;
+    let ds_coarse = racing_line_solution.ds;
+    let n_profile = racing_line_solution.n_profile;
+    let u = racing_line_solution.u;
+    let kappa = racing_line_solution.kappa;
+    let a_lat = racing_line_solution.a_lats;
+    let grip_usage = racing_line_solution.grip_usage;
 
     let mean_abs_n = n_profile.iter().map(|n| n.abs()).sum::<f64>() / n_profile.len() as f64;
     let max_abs_n = n_profile.iter().cloned().fold(0.0_f64, |acc, n| acc.max(n.abs()));
@@ -309,6 +321,10 @@ pub fn solve_racing_line_for_track(track: &str, spacing: f64) -> Result<RacingLi
         y_right,
         n_profile,
         speed_kmh,
+        u,
+        kappa,
+        a_lat,
+        grip_usage,
     })
 }
 

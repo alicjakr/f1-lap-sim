@@ -94,6 +94,10 @@ fn main() {
             n_profile: &result.n_profile,
             velocity: &velocity_ms,
             ds: ds_coarse,
+            u: &result.u,
+            kappa: &result.kappa,
+            a_lat: &result.a_lat,
+            grip_usage: &result.grip_usage,
         };
         track::export_racing_line_csv(&line, Path::new(&racingline_xy_path)).unwrap();
         println!("Exported racing-line X/Y path -> {}", racingline_xy_path);

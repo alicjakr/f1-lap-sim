@@ -64,7 +64,7 @@ fn zero_width_reduces_to_the_fixed_line() {
     let zero = vec![0.0; n_full];
 
     let (_, fixed_time, _) = solve_min_time(&inp).expect("fixed-line solve failed");
-    let (_, _, racing_time, _) =
+    let result =
         solve_racing_line(&inp, &bound_s, &zero, &zero).expect("racing-line solve failed");
 
     // Relative, at the solvers' own precision: Ipopt stops at tol = 1e-6, and the two problems
@@ -72,6 +72,7 @@ fn zero_width_reduces_to_the_fixed_line() {
     // to about 1e-6 relative, not to the last digit. A real formulation discrepancy is orders
     // of magnitude larger -- the bugs this test found moved lap times by 0.03 s to whole
     // seconds, i.e. 1e-3 to 1e-1 relative -- so 1e-5 keeps its sensitivity.
+    let racing_time = result.lap_time;
     assert!(
         (racing_time - fixed_time).abs() / fixed_time < 1e-5,
         "zero-width racing line {racing_time:.9}s != fixed line {fixed_time:.9}s"
@@ -92,8 +93,9 @@ fn wider_corridor_is_never_slower() {
     for half_width in [0.0, 1.0, 2.0, 4.0] {
         let left = vec![half_width; n_full];
         let right = vec![-half_width; n_full];
-        let (_, _, t, _) =
+        let result =
             solve_racing_line(&inp, &bound_s, &left, &right).expect("racing-line solve failed");
+        let t = result.lap_time;
         assert!(
             t <= previous + 1e-6,
             "half-width {half_width} m gave {t:.6}s, slower than the narrower corridor's {previous:.6}s"
@@ -187,7 +189,7 @@ fn tighter_steering_rate_is_never_faster() {
 
     let solve = |omega: Option<f64>| {
         let inp = SolveInputs { omega_max: omega, ..inputs(&curvature, &p) };
-        solve_racing_line(&inp, &bound_s, &left, &right).expect("solve failed").2
+        solve_racing_line(&inp, &bound_s, &left, &right).expect("solve failed").lap_time
     };
 
     // These values are chosen to BIND. A cap of 0.05 or even 0.01 leaves this track's lap
@@ -257,8 +259,11 @@ fn racing_line_solution_stays_inside_its_bounds() {
     let right = vec![half_right; n_full];
 
     let inp = inputs(&curvature, &p);
-    let (velocity, n_profile, _, ds) =
+    let result =
         solve_racing_line(&inp, &bound_s, &left, &right).expect("solve failed");
+    let velocity = result.velocity;
+    let n_profile = result.n_profile;
+    let ds = result.ds;
 
     let (kappa_ref, _) = f1_lap_sim::optimal::coarsen_periodic(&curvature, 1.0, SPACING_M);
     assert_eq!(kappa_ref.len(), n_profile.len());

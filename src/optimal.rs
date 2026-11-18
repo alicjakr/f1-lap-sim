@@ -1144,6 +1144,21 @@ impl ConstrainedProblem for RacingLineProblem {
     }
 }
 
+// struct for returning in solve_racing_line
+#[derive(Debug, Clone)]
+pub struct RacingLineSolution {
+    pub velocity: Vec<f64>,
+    pub n_profile: Vec<f64>,
+    pub lap_time: f64,
+    pub ds: f64,
+    pub u: Vec<f64>,
+    pub xi: Vec<f64>,
+    pub kappa: Vec<f64>,
+    pub p_k: Vec<f64>,
+    pub a_lats: Vec<f64>,
+    pub grip_usage: Vec<f64>,
+}
+
 /// Solves the minimum-time problem with a free lateral offset (racing line) on the same
 /// coarse grid solve_min_time uses, plus track-boundary bounds on that offset. drs_s/
 /// drs_open are python_scripts/export_track.py's drs_zones.csv (see solve_min_time) -- pass
@@ -1154,7 +1169,7 @@ pub fn solve_racing_line(
     bound_s: &[f64],
     n_left_full: &[f64],
     n_right_full: &[f64],
-) -> Result<(Vec<f64>, Vec<f64>, f64, f64), String> {
+) -> Result<RacingLineSolution, String> {
     let SolveInputs { curvature: curvature_full, full_ds, params, spacing: target_spacing,
                       drs_s, drs_open, omega_max, ers_budget } = *inputs;
     let (curvature, ds) = coarsen_periodic(curvature_full, full_ds, target_spacing);
@@ -1197,7 +1212,7 @@ pub fn solve_racing_line(
     let problem = RacingLineProblem {
         curvature,
         params: params.clone(),
-        c_d,
+        c_d : c_d.clone(),
         ds,
         n,
         x_min,
@@ -1244,6 +1259,23 @@ pub fn solve_racing_line(
 
     let velocity: Vec<f64> = solution.primal_variables[0..n].iter().map(|x| x.sqrt()).collect();
     let n_profile: Vec<f64> = solution.primal_variables[2 * n..3 * n].to_vec();
+    let u: Vec<f64> = solution.primal_variables[n..2 * n].to_vec(); // longitudinal acceleration
+    let xi: Vec<f64> = solution.primal_variables[3 * n..4 * n].to_vec();
+    let kappa: Vec<f64> = solution.primal_variables[4 * n..5 * n].to_vec();
+    let p_k: Vec<f64> = solution.primal_variables[5 * n..6 * n].to_vec();
+    let v_2: Vec<f64> = velocity.iter().map(|&x| x * x).collect();
+    let mut a_lats: Vec<f64> = [].to_vec();
+
+    let grip_usage: Vec<f64> = (0..n)
+        .map(|i| {
+            let g_eff = G + params.c_l * v_2[i]; // c_l from params, G is constant
+            let a_lat = v_2[i] * kappa[i];
+            a_lats.push(a_lat);
+            let w = u[i] + c_d[i] * &v_2[i]; // tire longitudinal force
+            ((a_lat / (params.mu_lat * g_eff)).powi(2) + (w / (params.mu_lon * g_eff)).powi(2)).sqrt()
+        })
+        .collect();
+
     // Same trapezoid as the objective: Q_i*ds per segment, mean of 1/v over its two nodes.
     let xi_profile = &solution.primal_variables[3 * n..4 * n];
     let lap_time: f64 = (0..n)
@@ -1253,7 +1285,7 @@ pub fn solve_racing_line(
             ds * h / xi_profile[i].cos() * 0.5 * (1.0 / velocity[i] + 1.0 / velocity[j])
         })
         .sum();
-    Ok((velocity, n_profile, lap_time, ds))
+    Ok(RacingLineSolution {velocity, n_profile, lap_time, ds, u, xi, kappa, p_k, a_lats, grip_usage})
 }
 
 #[cfg(test)]

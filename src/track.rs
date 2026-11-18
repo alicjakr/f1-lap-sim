@@ -484,22 +484,27 @@ pub struct RacingLinePath<'a> {
     pub n_profile: &'a [f64],
     pub velocity: &'a [f64],
     pub ds: f64,
+    pub u: &'a [f64],
+    pub kappa: &'a [f64],
+    pub a_lat: &'a [f64],
+    pub grip_usage: &'a [f64],
 }
 
 pub fn export_racing_line_csv(line: &RacingLinePath, path: &Path) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
-    writeln!(writer, "s,x_ref,y_ref,x_line,y_line,x_left,y_left,x_right,y_right,n,speed_kmh")?;
+    writeln!(writer, "s,x_ref,y_ref,x_line,y_line,x_left,y_left,x_right,y_right,n,speed_kmh,u,kappa,a_lat,grip_usage")?;
 
     for i in 0..line.x_ref.len() {
         let s = i as f64 * line.ds;
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             s, line.x_ref[i], line.y_ref[i], line.x_line[i], line.y_line[i],
             line.x_left[i], line.y_left[i], line.x_right[i], line.y_right[i],
-            line.n_profile[i], line.velocity[i] * 3.6,
+            line.n_profile[i], line.velocity[i] * 3.6, line.u[i], line.kappa[i],
+            line.a_lat[i], line.grip_usage[i]
         )?;
     }
 
