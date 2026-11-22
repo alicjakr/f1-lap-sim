@@ -9,11 +9,11 @@ services:
     ports:
       - "9091:9090"
     command:
-      - '--config.file=/Downloads/prometheus-3.16.0.darwin-arm64/prometheus.yml'
-      - '--storage.tsdb.path=/Downloads/prometheus-3.16.0.darwin-arm64/data' # Path where Prometheus stores its data
+      - '--config.file=/prometheus-3.16.0.darwin-arm64/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus-3.16.0.darwin-arm64/data' # path where Prometheus stores its data
     volumes:
-      - ./prometheus.yml:/Downloads/prometheus-3.16.0.darwin-arm64/prometheus.yml
-      - ./data:/Downloads/prometheus-3.16.0.darwin-arm64/data
+      - ./prometheus.yml:/prometheus-3.16.0.darwin-arm64/prometheus.yml
+      - ./data:/prometheus-3.16.0.darwin-arm64/data
   grafana:
     image: grafana/grafana:latest
     ports:
@@ -34,7 +34,7 @@ services:
         echo 'waiting for grafana'
         sleep 5s
         cd /grafana
-        curl --request POST http://grafana:3000/api/datasources --header 'Content-Type: application/json' -d @datasources.json
-        curl --request POST http://grafana:3000/api/dashboards/db --header 'Content-Type: application/json' -d @dashboard.json"
+        curl --request POST http://host.docker.internal:3000/api/datasources --header 'Content-Type: application/json' -d @datasources.json
+        curl --request POST http://host.docker.internal:3000/api/dashboards/db --header 'Content-Type: application/json' -d @dashboard.json"
     networks:
       - prometheus
